@@ -1,0 +1,101 @@
+{
+  "codex": {
+    "source": "https://developers.openai.com/codex/config-schema.json",
+    "reviewed": "2026-09-14",
+    "sha256": "999a726cc8807061193a8a99d76fb1c4a3e267a75db62acc076ea6d1d848e6a2",
+    "rootFields": 98,
+    "coverage": "upstream schema"
+  },
+  "claude": {
+    "source": "https://json.schemastore.org/claude-code-settings.json",
+    "reviewed": "2026-09-14",
+    "sha256": "b878628ca4bcb0171439b02e2221b0567d104c60096f024d9ad2a97e185af4d6",
+    "rootFields": 142,
+    "coverage": "upstream schema"
+  },
+  "gemini": {
+    "source": "https://raw.githubusercontent.com/google-gemini/gemini-cli/main/schemas/settings.schema.json",
+    "reviewed": "2026-09-14",
+    "sha256": "e3b48f76f6a041d914d5ba86ff7bffef3801ce84e386690bbce39459f6c55385",
+    "rootFields": 27,
+    "coverage": "upstream schema"
+  },
+  "opencode": {
+    "source": "https://opencode.ai/config.json",
+    "reviewed": "2026-09-14",
+    "sha256": "1c8def41c96f133e6af3b9afa194800657ce7fa55cea373deb88d68a171e27e0",
+    "rootFields": 36,
+    "coverage": "upstream schema",
+    "bundledDependency": "https://models.dev/model-schema.json"
+  },
+  "opencode-tui": {
+    "source": "https://opencode.ai/tui.json",
+    "reviewed": "2026-09-14",
+    "sha256": "ed3277b80114a29e59da27b40f0b0ff3a6c594676f3d3361e83496bc18fbbcb0",
+    "rootFields": 13,
+    "coverage": "upstream schema"
+  },
+  "continue": {
+    "source": "https://www.npmjs.com/package/@continuedev/config-yaml/v/1.42.0",
+    "reviewed": "2026-09-14",
+    "sha256": "fe15dd6688f53f0941999176fcf5e167a91db9c1f6f1c0e4aa491f17599e13b6",
+    "rootFields": 13,
+    "coverage": "upstream schema"
+  },
+  "cursor": {
+    "source": "https://cursor.com/docs/cli/reference/configuration",
+    "reviewed": "2026-09-14",
+    "sha256": "bc08a0ba40b15fa08bd88cd555e47d6db15aa6e9074dde14f7f9decf54c2707a",
+    "rootFields": 16,
+    "coverage": "documented fields; partial constraints"
+  },
+  "aider": {
+    "source": "https://github.com/Aider-AI/aider/blob/main/aider/args.py",
+    "reviewed": "2026-09-14",
+    "sha256": "81abba3b8a010a9f62b0db221943678960b99b9c184b3a5b6eb48a30b254c320",
+    "rootFields": 119,
+    "coverage": "documented fields; partial constraints"
+  },
+  "goose": {
+    "source": "https://github.com/block/goose/blob/main/documentation/docs/guides/config-files.md",
+    "reviewed": "2026-09-14",
+    "sha256": "04c8a0c772517b478a6ab45dec8be9ed9afcddeff4794f89731414188a2d8ac0",
+    "rootFields": 35,
+    "coverage": "documented fields; partial constraints"
+  },
+  "copilot": {
+    "source": "https://github.com/github/docs/blob/main/content/copilot/reference/copilot-cli-reference/cli-config-dir-reference.md",
+    "reviewed": "2026-09-14",
+    "sha256": "ead0ab729711fa462f63756f5858340b02e37f1b390edea2d3f8b09d60c7753f",
+    "rootFields": 68,
+    "coverage": "documented fields; partial constraints"
+  },
+  "cursor-mcp": {
+    "source": "https://cursor.com/docs/mcp",
+    "reviewed": "2026-09-14",
+    "sha256": "91969e49984b7ba003e4d13f52ccf66bf15f0d6d4c9fcca2fc6c50ac9ce9a61a",
+    "rootFields": 1,
+    "coverage": "documented fields; partial constraints"
+  },
+  "claude-desktop": {
+    "source": "https://modelcontextprotocol.io/docs/develop/connect-local-servers",
+    "reviewed": "2026-09-14",
+    "sha256": "2bf6bf3bcd12728a64fa157513a687feed7a0552470d0cbdb335b93f3753b8fb",
+    "rootFields": 1,
+    "coverage": "documented fields; partial constraints"
+  },
+  "cline-mcp": {
+    "source": "https://docs.cline.bot/mcp/mcp-overview",
+    "reviewed": "2026-09-14",
+    "sha256": "b8d944f24189b261a3322190fbcc49fda424ef8f46c688112cd9c962b7138a2e",
+    "rootFields": 1,
+    "coverage": "documented fields; partial constraints"
+  },
+  "copilot-mcp": {
+    "source": "https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers",
+    "reviewed": "2026-09-14",
+    "sha256": "fdb13945ea3043e53ece56df52efd194c20692f26fb89ec3126b1048f309b755",
+    "rootFields": 1,
+    "coverage": "documented fields; partial constraints"
+  }
+}

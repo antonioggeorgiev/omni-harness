@@ -1,3 +1,10 @@
+import {
+  configurationTabs,
+  type ConfigurationTabId,
+  type Json,
+  sourceReadOnly,
+} from "./configuration-model";
+import { ConfigurationExplorer, ConfigurationValidation } from "./configuration-explorer";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -99,6 +106,8 @@ interface ContextArtifact {
   activation: string;
   path: string;
   external: boolean;
+  createdAt?: number | null;
+  modifiedAt?: number | null;
 }
 
 interface ProjectContextReport {
@@ -116,39 +125,20 @@ interface ConfigurationFilePreview {
   revision?: string;
   content?: unknown;
   diagnostic?: string;
+  schemaId?: string;
+  schemaIssues?: { path: string; rule: string }[];
 }
 
 interface McpServerSummary {
   id: string;
   sourceId: string;
   name: string;
-  transport: "HTTP" | "stdio";
+  transport: string;
   endpoint: string;
   enabled: boolean;
   enabledPath?: string[];
   usesDisabledFlag: boolean;
 }
-
-type ConfigurationTabId =
-  | "raw-config"
-  | "mcp-servers"
-  | "general"
-  | "features"
-  | "plugins"
-  | "projects"
-  | "environment"
-  | "system";
-
-const configurationTabs: { id: ConfigurationTabId; label: string }[] = [
-  { id: "raw-config", label: "Raw config" },
-  { id: "mcp-servers", label: "MCP servers" },
-  { id: "general", label: "General" },
-  { id: "features", label: "Features" },
-  { id: "plugins", label: "Plugins" },
-  { id: "projects", label: "Project config" },
-  { id: "environment", label: "Environment" },
-  { id: "system", label: "System" },
-];
 
 const lastOpenedConfigurationKey = "last-opened-configuration-id";
 const configurationTabsByTargetKey = "configuration-tabs-by-target";
@@ -195,10 +185,10 @@ function storedConfigurationTabsByTarget(): Partial<Record<string, Configuration
 
 function storedConfigurationTab(targetId?: string): ConfigurationTabId {
   if (!targetId) {
-    return "raw-config";
+    return "general";
   }
 
-  return storedConfigurationTabsByTarget()[targetId] ?? "raw-config";
+  return storedConfigurationTabsByTarget()[targetId] ?? "general";
 }
 
 function storeConfigurationTab(targetId: string, tab: ConfigurationTabId) {
@@ -1078,6 +1068,10 @@ function ProjectContextInventory({
                         ? item.path.slice(report.root.length + 1)
                         : item.path}
                     </p>
+                    <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <ContextFileDate label="Created" timestamp={item.createdAt} />
+                      <ContextFileDate label="Modified" timestamp={item.modifiedAt} />
+                    </div>
                   </div>
                   <button
                     aria-label={`Preview and edit ${item.path}`}
@@ -1398,6 +1392,22 @@ function ContextEditor({
   );
 }
 
+function ContextFileDate({ label, timestamp }: { label: string; timestamp?: number | null }) {
+  const date = timestamp == null ? undefined : new Date(timestamp * 1000);
+  return (
+    <span>
+      {label}{" "}
+      {date && !Number.isNaN(date.getTime()) ? (
+        <time dateTime={date.toISOString()} title={date.toLocaleString()}>
+          {date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}
+        </time>
+      ) : (
+        <span title="This timestamp is unavailable from the filesystem">Unavailable</span>
+      )}
+    </span>
+  );
+}
+
 function contextItemName(item: ContextArtifact) {
   const segments = item.path.split(/[\\/]/).filter(Boolean);
   if (item.kind === "skill") return segments[segments.length - 2] ?? "Skill";
@@ -1537,7 +1547,7 @@ function ConfigurationPage({
   );
 
   const saveStructuredChange = useCallback(
-    async (id: string, storeId: string, path: string[], value: string | boolean | number) => {
+    async (id: string, storeId: string, path: string[], value: Json) => {
       const preview = report?.previews.find((item) => item.id === storeId);
       if (!preview?.revision) {
         setWriteError("This configuration has no revision. Reload it before making changes.");
@@ -1626,12 +1636,6 @@ function ConfigurationPage({
           activeTab={activeTab}
           canEditCodex={report.id === "codex:codex-local"}
           onTabChange={selectTab}
-          onUpdateFeature={(key, enabled) =>
-            saveCodexChange(`feature:${key}`, "update_codex_feature", { key, enabled })
-          }
-          onUpdateGeneral={(key, value) =>
-            saveCodexChange(`general:${key}`, "update_codex_general_setting", { key, value })
-          }
           onUpdateMcp={(server, enabled) =>
             saveCodexChange(`mcp:${server}`, "update_codex_mcp_enabled", { server, enabled })
           }
@@ -1648,8 +1652,6 @@ function ConfigurationDetails({
   activeTab,
   canEditCodex,
   onTabChange,
-  onUpdateFeature,
-  onUpdateGeneral,
   onUpdateMcp,
   onUpdateStructured,
   report,
@@ -1658,36 +1660,17 @@ function ConfigurationDetails({
   activeTab: ConfigurationTabId;
   canEditCodex: boolean;
   onTabChange: (tab: ConfigurationTabId) => void;
-  onUpdateFeature: (key: string, enabled: boolean) => Promise<boolean>;
-  onUpdateGeneral: (key: string, value: string) => Promise<boolean>;
   onUpdateMcp: (server: string, enabled: boolean) => Promise<boolean>;
   onUpdateStructured: (
     id: string,
     storeId: string,
     path: string[],
-    value: string | boolean | number,
+    value: Json,
   ) => Promise<boolean>;
   report: ConfigurationReport;
   savingId?: string;
 }) {
   const mcpServers = useMemo(() => mcpServersFromPreviews(report.previews), [report.previews]);
-  const source = useMemo(() => configurationSourceFromPreviews(report.previews), [report.previews]);
-  const config = source?.content ?? {};
-  const canEditStructured = Boolean(source && source.format !== "TOML");
-  const canEdit = canEditCodex || canEditStructured;
-
-  const updateGeneral = (path: string[], value: string | boolean | number) =>
-    canEditCodex
-      ? onUpdateGeneral(path[0], String(value))
-      : source
-        ? onUpdateStructured(`general:${path.join(".")}`, source.id, path, value)
-        : Promise.resolve(false);
-  const updateFeature = (key: string, enabled: boolean) =>
-    canEditCodex
-      ? onUpdateFeature(key, enabled)
-      : source
-        ? onUpdateStructured(`feature:${key}`, source.id, ["features", key], enabled)
-        : Promise.resolve(false);
   const updateMcp = (server: McpServerSummary, enabled: boolean) =>
     canEditCodex
       ? onUpdateMcp(server.name, enabled)
@@ -1716,6 +1699,13 @@ function ConfigurationDetails({
         </div>
       </div>
 
+      {report.previews.length === 0 && (
+        <p className="mt-4 rounded-lg border p-4 text-sm text-muted-foreground">
+          Installation detection only. Configuration support for this tool has not been verified
+          yet.
+        </p>
+      )}
+      <ConfigurationValidation previews={report.previews} />
       {activeTab === "raw-config" && <RawConfigurationPreview previews={report.previews} />}
       {activeTab === "mcp-servers" && (
         <McpServers
@@ -1725,40 +1715,21 @@ function ConfigurationDetails({
           servers={mcpServers}
         />
       )}
-      {activeTab === "general" && (
-        <GeneralSettings
-          canEdit={canEdit}
-          config={config}
-          useGenericSettings={canEditStructured}
-          onUpdate={updateGeneral}
-          savingId={savingId}
-        />
-      )}
-      {activeTab === "features" && (
-        <FeatureSettings
-          canEdit={canEdit}
-          config={config}
-          onUpdate={updateFeature}
-          savingId={savingId}
-        />
-      )}
       {activeTab === "plugins" && <PluginSettings previews={report.previews} />}
-      {activeTab === "projects" && <ProjectSettings config={config} />}
-      {activeTab === "environment" && <EnvironmentSettings config={config} />}
-      {activeTab === "system" && <SystemSettings config={config} />}
-      {canEdit && (
-        <p className="mt-4 text-xs text-muted-foreground">
-          Edits are revision-checked, saved atomically, and backed up alongside the config.
-          {canEditStructured &&
-            source?.format !== "JSON" &&
-            " JSONC and YAML saves normalize formatting."}
-        </p>
+      {activeTab !== "raw-config" && (
+        <ConfigurationExplorer
+          key={report.id}
+          previews={report.previews}
+          tab={activeTab}
+          family={report.id.split(":")[0] === "gemini-cli" ? "gemini" : report.id.split(":")[0]}
+          saving={savingId !== undefined}
+          onUpdate={onUpdateStructured}
+        />
       )}
-      {!canEdit && (
-        <p className="mt-4 text-xs text-muted-foreground">
-          This provider is shown in safe read-only mode while its dedicated write adapter is added.
-        </p>
-      )}
+      <p className="mt-4 text-xs text-muted-foreground">
+        Edits are revision-checked, saved atomically and backed up. JSONC and YAML saves normalize
+        formatting.
+      </p>
     </div>
   );
 }
@@ -1901,13 +1872,13 @@ function mcpServersFromPreviews(previews: ConfigurationFilePreview[]): McpServer
       return [];
     }
 
-    return mcpServerEntries(preview.content).flatMap(({ name, path, value }) => {
+    return mcpServerEntries(preview.content, preview.id).flatMap(({ name, path, value }) => {
       if (!isRecord(value)) {
         return [];
       }
 
-      const url = firstString(value.url, value.httpUrl);
-      const commandValue = value.command;
+      const url = firstString(value.url, value.httpUrl, value.uri);
+      const commandValue = value.command ?? value.cmd;
       const commandParts = Array.isArray(commandValue)
         ? commandValue.filter((part): part is string => typeof part === "string")
         : [];
@@ -1929,10 +1900,17 @@ function mcpServersFromPreviews(previews: ConfigurationFilePreview[]): McpServer
           id: `${preview.path}:${name}`,
           sourceId: preview.id,
           name,
-          transport: url ? "HTTP" : "stdio",
+          transport:
+            typeof value.type === "string"
+              ? value.type
+              : url
+                ? value.httpUrl
+                  ? "HTTP"
+                  : "HTTP / SSE"
+                : "stdio",
           endpoint: endpoint || "No endpoint or launch command configured",
           enabled: usesDisabledFlag ? value.disabled !== true : value.enabled !== false,
-          enabledPath,
+          enabledPath: sourceReadOnly(preview.id, preview.path) ? undefined : enabledPath,
           usesDisabledFlag,
         },
       ];
@@ -1940,7 +1918,10 @@ function mcpServersFromPreviews(previews: ConfigurationFilePreview[]): McpServer
   });
 }
 
-function mcpServerEntries(config: Record<string, unknown>): {
+function mcpServerEntries(
+  config: Record<string, unknown>,
+  sourceId: string,
+): {
   name: string;
   path: string[];
   value: unknown;
@@ -1969,14 +1950,22 @@ function mcpServerEntries(config: Record<string, unknown>): {
     });
   }
 
-  const openCodeServers = isRecord(config.mcp) ? config.mcp.servers : undefined;
-  return isRecord(openCodeServers)
-    ? Object.entries(openCodeServers).map(([name, value]) => ({
-        name,
-        path: ["mcp", "servers", name],
-        value,
-      }))
-    : [];
+  if (sourceId.startsWith("opencode-") && isRecord(config.mcp)) {
+    return Object.entries(config.mcp).map(([name, value]) => ({
+      name,
+      path: ["mcp", name],
+      value,
+    }));
+  }
+  if (sourceId.startsWith("goose-") && isRecord(config.extensions)) {
+    return Object.entries(config.extensions)
+      .filter(
+        ([, value]) =>
+          isRecord(value) && ["stdio", "sse", "streamable_http"].includes(String(value.type)),
+      )
+      .map(([name, value]) => ({ name, path: ["extensions", name], value }));
+  }
+  return [];
 }
 
 function firstString(...values: unknown[]) {
@@ -1985,13 +1974,6 @@ function firstString(...values: unknown[]) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function configurationSourceFromPreviews(previews: ConfigurationFilePreview[]) {
-  const preview = previews.find((item) => isRecord(item.content));
-  return preview && isRecord(preview.content)
-    ? { content: preview.content, format: preview.format, id: preview.id }
-    : undefined;
 }
 
 function configurationRevision(report?: ConfigurationReport) {
@@ -2022,258 +2004,6 @@ function EmptyConfigurationState({ children }: { children: ReactNode }) {
     <div className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
       {children}
     </div>
-  );
-}
-
-function ConfigSummaryGrid({ entries }: { entries: [string, unknown][] }) {
-  return (
-    <dl className="grid overflow-hidden rounded-lg border bg-card sm:grid-cols-2">
-      {entries.map(([label, value]) => (
-        <div
-          className="border-b px-4 py-3 last:border-b-0 sm:[&:nth-last-child(2):nth-child(odd)]:border-b-0 sm:[&:nth-child(odd)]:border-r"
-          key={label}
-        >
-          <dt className="text-xs font-medium text-muted-foreground">{humanizeConfigKey(label)}</dt>
-          <dd className="mt-1 break-words text-sm font-medium">{formatConfigValue(value)}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-function ConfigObjectCards({ entries }: { entries: [string, unknown][] }) {
-  return (
-    <div className="space-y-4">
-      {entries.map(([section, value]) => {
-        const settings = recordEntries(value);
-
-        return (
-          <article className="overflow-hidden rounded-lg border bg-card" key={section}>
-            <h2 className="border-b px-4 py-3 text-sm font-semibold">
-              {humanizeConfigKey(section)}
-            </h2>
-            {settings.length > 0 ? (
-              <dl className="divide-y">
-                {settings.map(([label, setting]) => (
-                  <div className="flex items-center justify-between gap-4 px-4 py-3" key={label}>
-                    <dt className="text-sm text-muted-foreground">{humanizeConfigKey(label)}</dt>
-                    <dd className="max-w-[60%] break-words text-right text-sm font-medium">
-                      {formatConfigValue(setting)}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-            ) : (
-              <p className="px-4 py-3 text-sm text-muted-foreground">{formatConfigValue(value)}</p>
-            )}
-          </article>
-        );
-      })}
-    </div>
-  );
-}
-
-function GeneralSettings({
-  canEdit,
-  config,
-  onUpdate,
-  savingId,
-  useGenericSettings,
-}: {
-  canEdit: boolean;
-  config: Record<string, unknown>;
-  onUpdate: (path: string[], value: string | boolean | number) => Promise<boolean>;
-  savingId?: string;
-  useGenericSettings: boolean;
-}) {
-  const entries = useGenericSettings
-    ? editableScalarEntries(config)
-    : configEntries(config, [
-        "model",
-        "model_reasoning_effort",
-        "approval_policy",
-        "approval_mode",
-        "personality",
-        "cwd",
-      ]).flatMap(([label, value]) => (isEditableScalar(value) ? [{ path: [label], value }] : []));
-
-  return (
-    <ConfigurationPanel tabId="general">
-      {entries.length > 0 ? (
-        <dl className="grid overflow-hidden rounded-lg border bg-card sm:grid-cols-2">
-          {entries.map((entry) => (
-            <GeneralSetting
-              canEdit={canEdit && entry.path[0] !== "cwd"}
-              key={entry.path.join(".")}
-              label={entry.path}
-              onUpdate={onUpdate}
-              saving={savingId === `general:${entry.path.join(".")}`}
-              value={entry.value}
-            />
-          ))}
-        </dl>
-      ) : (
-        <EmptyConfigurationState>No general settings are configured.</EmptyConfigurationState>
-      )}
-    </ConfigurationPanel>
-  );
-}
-
-function GeneralSetting({
-  canEdit,
-  label,
-  onUpdate,
-  saving,
-  value,
-}: {
-  canEdit: boolean;
-  label: string[];
-  onUpdate: (path: string[], value: string | boolean | number) => Promise<boolean>;
-  saving: boolean;
-  value: string | boolean | number;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(String(value));
-
-  useEffect(() => {
-    if (!editing) {
-      setDraft(String(value));
-    }
-  }, [editing, value]);
-
-  const save = async () => {
-    const next = typeof value === "number" ? Number(draft) : draft;
-    if (next === value || (typeof next === "number" && Number.isNaN(next))) {
-      setEditing(false);
-      return;
-    }
-    if (await onUpdate(label, next)) {
-      setEditing(false);
-    }
-  };
-
-  const displayLabel = label.map(humanizeConfigKey).join(" · ");
-
-  return (
-    <div className="border-b px-4 py-3 last:border-b-0 sm:[&:nth-last-child(2):nth-child(odd)]:border-b-0 sm:[&:nth-child(odd)]:border-r">
-      <dt className="text-xs font-medium text-muted-foreground">{displayLabel}</dt>
-      {typeof value === "boolean" ? (
-        <dd className="mt-1 flex items-center justify-between gap-3 text-sm font-medium">
-          <span>{formatConfigValue(value)}</span>
-          {canEdit && (
-            <Switch
-              aria-label={`${value ? "Disable" : "Enable"} ${displayLabel}`}
-              checked={value}
-              disabled={saving}
-              onCheckedChange={(enabled) => void onUpdate(label, enabled)}
-            />
-          )}
-        </dd>
-      ) : editing ? (
-        <dd className="mt-2 flex items-center gap-2">
-          <input
-            aria-label={`Update ${displayLabel}`}
-            className="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-ring"
-            disabled={saving}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                void save();
-              }
-              if (event.key === "Escape") {
-                setEditing(false);
-              }
-            }}
-            value={draft}
-          />
-          <button
-            className="rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground disabled:opacity-50"
-            disabled={saving}
-            onClick={() => void save()}
-            type="button"
-          >
-            Save
-          </button>
-          <button
-            className="rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted"
-            disabled={saving}
-            onClick={() => setEditing(false)}
-            type="button"
-          >
-            Cancel
-          </button>
-        </dd>
-      ) : (
-        <dd className="mt-1 flex items-center justify-between gap-3 text-sm font-medium">
-          <span className="min-w-0 break-words">{formatConfigValue(value)}</span>
-          {canEdit && (
-            <button
-              className="shrink-0 text-xs font-medium text-primary hover:underline"
-              onClick={() => setEditing(true)}
-              type="button"
-            >
-              Edit
-            </button>
-          )}
-        </dd>
-      )}
-    </div>
-  );
-}
-
-function FeatureSettings({
-  canEdit,
-  config,
-  onUpdate,
-  savingId,
-}: {
-  canEdit: boolean;
-  config: Record<string, unknown>;
-  onUpdate: (key: string, enabled: boolean) => Promise<boolean>;
-  savingId?: string;
-}) {
-  const features = recordEntries(config.features);
-  const otherEntries = configEntries(config, ["desktop", "tui"]);
-
-  return (
-    <ConfigurationPanel tabId="features">
-      {features.length > 0 || otherEntries.length > 0 ? (
-        <div className="space-y-4">
-          {features.length > 0 && (
-            <article className="overflow-hidden rounded-lg border bg-card">
-              <h2 className="border-b px-4 py-3 text-sm font-semibold">Features</h2>
-              <dl className="divide-y">
-                {features.map(([key, setting]) => (
-                  <div className="flex items-center justify-between gap-4 px-4 py-3" key={key}>
-                    <dt className="text-sm text-muted-foreground">{humanizeConfigKey(key)}</dt>
-                    <dd className="flex shrink-0 items-center gap-3 text-sm font-medium">
-                      {typeof setting === "boolean" && canEdit ? (
-                        <>
-                          <span>{formatConfigValue(setting)}</span>
-                          <Switch
-                            aria-label={`${setting ? "Disable" : "Enable"} ${humanizeConfigKey(key)}`}
-                            checked={setting}
-                            disabled={savingId !== undefined}
-                            onCheckedChange={(enabled) => void onUpdate(key, enabled)}
-                          />
-                        </>
-                      ) : (
-                        formatConfigValue(setting)
-                      )}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-            </article>
-          )}
-          {otherEntries.length > 0 && <ConfigObjectCards entries={otherEntries} />}
-        </div>
-      ) : (
-        <EmptyConfigurationState>
-          No desktop, feature, or TUI settings are configured.
-        </EmptyConfigurationState>
-      )}
-    </ConfigurationPanel>
   );
 }
 
@@ -2426,140 +2156,8 @@ function AddonCollection({ entries, label }: { entries: ProviderAddon[]; label: 
   );
 }
 
-function ProjectSettings({ config }: { config: Record<string, unknown> }) {
-  const projects = recordEntries(config.projects);
-
-  return (
-    <ConfigurationPanel tabId="projects">
-      {projects.length === 0 ? (
-        <EmptyConfigurationState>
-          No project-specific overrides are configured.
-        </EmptyConfigurationState>
-      ) : (
-        <div className="grid gap-3 lg:grid-cols-2">
-          {projects.map(([path, value]) => (
-            <article className="rounded-lg border bg-card p-4" key={path}>
-              <code className="block truncate text-xs text-muted-foreground" title={path}>
-                {path}
-              </code>
-              <dl className="mt-3 space-y-2 text-sm">
-                {projectSummary(value).map(([label, setting]) => (
-                  <div className="flex items-center justify-between gap-3" key={label}>
-                    <dt className="text-muted-foreground">{humanizeConfigKey(label)}</dt>
-                    <dd className="text-right font-medium">{formatConfigValue(setting)}</dd>
-                  </div>
-                ))}
-              </dl>
-            </article>
-          ))}
-        </div>
-      )}
-    </ConfigurationPanel>
-  );
-}
-
-function EnvironmentSettings({ config }: { config: Record<string, unknown> }) {
-  const policy = isRecord(config.shell_environment_policy)
-    ? config.shell_environment_policy
-    : undefined;
-  const entries = policy
-    ? Object.entries(policy).map(
-        ([key, value]) => [key, collectionSummary(value)] as [string, unknown],
-      )
-    : [];
-
-  return (
-    <ConfigurationPanel tabId="environment">
-      {entries.length > 0 ? (
-        <>
-          <ConfigSummaryGrid entries={entries} />
-          <p className="mt-3 text-xs text-muted-foreground">
-            Environment values stay hidden; this view shows policy and rule counts only.
-          </p>
-        </>
-      ) : (
-        <EmptyConfigurationState>
-          No shell environment policy is configured.
-        </EmptyConfigurationState>
-      )}
-    </ConfigurationPanel>
-  );
-}
-
-function SystemSettings({ config }: { config: Record<string, unknown> }) {
-  const entries = configEntries(config, ["notice"]);
-
-  return (
-    <ConfigurationPanel tabId="system">
-      {entries.length > 0 ? (
-        <ConfigObjectCards entries={entries} />
-      ) : (
-        <EmptyConfigurationState>
-          No notices or migration settings are configured.
-        </EmptyConfigurationState>
-      )}
-    </ConfigurationPanel>
-  );
-}
-
-function configEntries(config: Record<string, unknown>, keys: string[]) {
-  return keys.filter((key) => key in config).map((key) => [key, config[key]] as [string, unknown]);
-}
-
-function isEditableScalar(value: unknown): value is string | boolean | number {
-  return typeof value === "string" || typeof value === "boolean" || typeof value === "number";
-}
-
-function editableScalarEntries(config: Record<string, unknown>) {
-  const excludedSections = new Set([
-    "mcp",
-    "mcp_servers",
-    "mcpServers",
-    "features",
-    "env",
-    "environment",
-  ]);
-  const entries: { path: string[]; value: string | boolean | number }[] = [];
-  const visit = (value: unknown, path: string[]) => {
-    const key = path[path.length - 1]?.toLowerCase() ?? "";
-    if (
-      ["secret", "token", "password", "api_key", "apikey", "credential"].some((term) =>
-        key.includes(term),
-      )
-    ) {
-      return;
-    }
-    if (isEditableScalar(value)) {
-      entries.push({ path, value });
-      return;
-    }
-    if (!isRecord(value) || path.length >= 2) {
-      return;
-    }
-    Object.entries(value).forEach(([childKey, childValue]) =>
-      visit(childValue, [...path, childKey]),
-    );
-  };
-
-  Object.entries(config).forEach(([key, value]) => {
-    if (!excludedSections.has(key)) {
-      visit(value, [key]);
-    }
-  });
-  return entries;
-}
-
 function recordEntries(value: unknown): [string, unknown][] {
   return isRecord(value) ? Object.entries(value) : [];
-}
-
-function projectSummary(value: unknown): [string, unknown][] {
-  if (!isRecord(value)) {
-    return [["configuration", configurationSummary(value)]];
-  }
-
-  const summary = configEntries(value, ["trust_level", "default_permissions", "approval_policy"]);
-  return summary.length > 0 ? summary : [["configuration", configurationSummary(value)]];
 }
 
 function collectionSummary(value: unknown): string {
@@ -2568,13 +2166,6 @@ function collectionSummary(value: unknown): string {
   }
   if (isRecord(value)) {
     return `${Object.keys(value).length} ${Object.keys(value).length === 1 ? "setting" : "settings"}`;
-  }
-  return formatConfigValue(value);
-}
-
-function configurationSummary(value: unknown): string {
-  if (isRecord(value) || Array.isArray(value)) {
-    return collectionSummary(value);
   }
   return formatConfigValue(value);
 }
@@ -2593,10 +2184,6 @@ function formatConfigValue(value: unknown): string {
     return collectionSummary(value);
   }
   return String(value);
-}
-
-function humanizeConfigKey(key: string): string {
-  return key.replace(/_/g, " ").replace(/\b\w/g, (character: string) => character.toUpperCase());
 }
 
 function ConfigurationSkeleton() {

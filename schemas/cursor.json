@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "editor": {
+      "type": "object",
+      "properties": {
+        "vimMode": {
+          "type": "boolean"
+        }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "channel": {
+      "type": "string"
+    },
+    "model": {
+      "type": "object"
+    },
+    "maxMode": {
+      "type": "boolean"
+    },
+    "hasChangedDefaultModel": {
+      "type": "boolean",
+      "readOnly": true
+    },
+    "notifications": {
+      "type": "boolean"
+    },
+    "hints": {
+      "type": "boolean"
+    },
+    "rewind": {
+      "type": "boolean"
+    },
+    "suggestNextPrompt": {
+      "type": "boolean"
+    },
+    "display": {
+      "type": "object",
+      "properties": {
+        "showLineNumbers": {
+          "type": "boolean"
+        },
+        "showThinkingBlocks": {
+          "type": "boolean"
+        },
+        "showStatusIndicators": {
+          "type": "boolean"
+        },
+        "showStatusLineRunningTime": {
+          "type": "boolean"
+        }
+      }
+    },
+    "approvalMode": {
+      "type": "string",
+      "enum": ["allowlist", "auto-review", "unrestricted"]
+    },
+    "sandbox": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "networkAccess": {
+          "type": "string"
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "useHttp1ForAgent": {
+          "type": "boolean"
+        }
+      }
+    },
+    "attribution": {
+      "type": "object",
+      "properties": {
+        "attributeCommitsToAgent": {
+          "type": "boolean"
+        },
+        "attributePRsToAgent": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

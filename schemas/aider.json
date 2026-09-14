@@ -1,0 +1,543 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "model": {
+      "type": "string",
+      "description": "Specify the model to use for the main chat"
+    },
+    "openai-api-key": {
+      "type": "string",
+      "description": "Specify the OpenAI API key"
+    },
+    "anthropic-api-key": {
+      "type": "string",
+      "description": "Specify the Anthropic API key"
+    },
+    "openai-api-base": {
+      "type": "string",
+      "description": "Specify the api base url"
+    },
+    "openai-api-type": {
+      "type": "string",
+      "description": "(deprecated, use --set-env OPENAI_API_TYPE=<value>)"
+    },
+    "openai-api-version": {
+      "type": "string",
+      "description": "(deprecated, use --set-env OPENAI_API_VERSION=<value>)"
+    },
+    "openai-api-deployment-id": {
+      "type": "string",
+      "description": "(deprecated, use --set-env OPENAI_API_DEPLOYMENT_ID=<value>)"
+    },
+    "openai-organization-id": {
+      "type": "string",
+      "description": "(deprecated, use --set-env OPENAI_ORGANIZATION=<value>)"
+    },
+    "set-env": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "description": "Set an environment variable (to control API settings, can be used multiple times)"
+    },
+    "api-key": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "description": "Set an API key for a provider (eg: --api-key provider=<key> sets PROVIDER_API_KEY=<key>)"
+    },
+    "list-models": {
+      "type": "string",
+      "description": "List known models which match the (partial) MODEL name"
+    },
+    "alias": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "description": "Add a model alias (can be used multiple times)"
+    },
+    "reasoning-effort": {
+      "type": "string",
+      "description": "Set the reasoning_effort API parameter (default: not set)"
+    },
+    "thinking-tokens": {
+      "type": "string",
+      "description": "Set the thinking token budget for models that support it. Use 0 to disable. (default: not set)"
+    },
+    "verify-ssl": {
+      "type": "string",
+      "description": "Verify the SSL cert when connecting to models (default: True)"
+    },
+    "timeout": {
+      "type": "number",
+      "description": "Timeout in seconds for API calls (default: None)"
+    },
+    "edit-format": {
+      "type": "string",
+      "description": "Specify what edit format the LLM should use (default depends on model)"
+    },
+    "architect": {
+      "type": "string",
+      "description": "Use architect edit format for the main chat"
+    },
+    "auto-accept-architect": {
+      "type": "string",
+      "description": "Enable/disable automatic acceptance of architect changes (default: True)"
+    },
+    "weak-model": {
+      "type": "string",
+      "description": "Specify the model to use for commit messages and chat history summarization (default depends on --model)"
+    },
+    "editor-model": {
+      "type": "string",
+      "description": "Specify the model to use for editor tasks (default depends on --model)"
+    },
+    "editor-edit-format": {
+      "type": "string",
+      "description": "Specify the edit format for the editor model (default: depends on editor model)"
+    },
+    "show-model-warnings": {
+      "type": "string",
+      "description": "Only work with models that have meta-data available (default: True)"
+    },
+    "check-model-accepts-settings": {
+      "type": "string",
+      "description": "Check if model accepts settings like reasoning_effort/thinking_tokens (default: True)"
+    },
+    "max-chat-history-tokens": {
+      "type": "integer",
+      "description": "Soft limit on tokens for chat history, after which summarization begins. If unspecified, defaults to the model's max_chat_history_tokens."
+    },
+    "cache-prompts": {
+      "type": "string",
+      "description": "Enable caching of prompts (default: False)"
+    },
+    "cache-keepalive-pings": {
+      "type": "integer",
+      "description": "Number of times to ping at 5min intervals to keep prompt cache warm (default: 0)"
+    },
+    "map-tokens": {
+      "type": "integer",
+      "description": "Suggested number of tokens to use for repo map, use 0 to disable"
+    },
+    "map-refresh": {
+      "type": "string",
+      "description": "Control how often the repo map is refreshed. Options: auto, always, files, manual (default: auto)",
+      "enum": ["auto", "always", "files", "manual"]
+    },
+    "map-multiplier-no-files": {
+      "type": "number",
+      "description": "Multiplier for map tokens when no files are specified (default: 2)"
+    },
+    "restore-chat-history": {
+      "type": "string",
+      "description": "Restore the previous chat history messages (default: False)"
+    },
+    "dark-mode": {
+      "type": "boolean",
+      "description": "Use colors suitable for a dark terminal background (default: False)"
+    },
+    "light-mode": {
+      "type": "boolean",
+      "description": "Use colors suitable for a light terminal background (default: False)"
+    },
+    "pretty": {
+      "type": "string",
+      "description": "Enable/disable pretty, colorized output (default: True)"
+    },
+    "stream": {
+      "type": "string",
+      "description": "Enable/disable streaming responses (default: True)"
+    },
+    "user-input-color": {
+      "type": "string",
+      "description": "Set the color for user input (default: #00cc00)"
+    },
+    "tool-output-color": {
+      "type": "string",
+      "description": "Set the color for tool output (default: None)"
+    },
+    "tool-error-color": {
+      "type": "string",
+      "description": "Set the color for tool error messages (default: #FF2222)"
+    },
+    "tool-warning-color": {
+      "type": "string",
+      "description": "Set the color for tool warning messages (default: #FFA500)"
+    },
+    "assistant-output-color": {
+      "type": "string",
+      "description": "Set the color for assistant output (default: #0088ff)"
+    },
+    "completion-menu-color": {
+      "type": "string",
+      "description": "Set the color for the completion menu (default: terminal's default text color)"
+    },
+    "completion-menu-bg-color": {
+      "type": "string",
+      "description": "Set the background color for the completion menu (default: terminal's default background color)"
+    },
+    "completion-menu-current-color": {
+      "type": "string",
+      "description": "Set the color for the current item in the completion menu (default: terminal's default background color)"
+    },
+    "completion-menu-current-bg-color": {
+      "type": "string",
+      "description": "Set the background color for the current item in the completion menu (default: terminal's default text color)"
+    },
+    "code-theme": {
+      "type": "string",
+      "description": "Set the markdown code theme (default: default, other options include monokai, solarized-dark, solarized-light, or a Pygments builtin style, see https://pygments.org/styles for available themes)"
+    },
+    "show-diffs": {
+      "type": "boolean",
+      "description": "Show diffs when committing changes (default: False)"
+    },
+    "git": {
+      "type": "string",
+      "description": "Enable/disable looking for a git repo (default: True)"
+    },
+    "gitignore": {
+      "type": "string",
+      "description": "Enable/disable adding .aider* to .gitignore (default: True)"
+    },
+    "add-gitignore-files": {
+      "type": "string",
+      "description": "Enable/disable the addition of files listed in .gitignore to Aider's editing scope."
+    },
+    "subtree-only": {
+      "type": "boolean",
+      "description": "Only consider files in the current subtree of the git repository"
+    },
+    "auto-commits": {
+      "type": "string",
+      "description": "Enable/disable auto commit of LLM changes (default: True)"
+    },
+    "dirty-commits": {
+      "type": "string",
+      "description": "Enable/disable commits when repo is found dirty (default: True)"
+    },
+    "attribute-author": {
+      "type": "string",
+      "description": "Attribute aider code changes in the git author name (default: True). If explicitly set to True, overrides --attribute-co-authored-by precedence."
+    },
+    "attribute-committer": {
+      "type": "string",
+      "description": "Attribute aider commits in the git committer name (default: True). If explicitly set to True, overrides --attribute-co-authored-by precedence for aider edits."
+    },
+    "attribute-commit-message-author": {
+      "type": "string",
+      "description": "Prefix commit messages with 'aider: ' if aider authored the changes (default: False)"
+    },
+    "attribute-commit-message-committer": {
+      "type": "string",
+      "description": "Prefix all commit messages with 'aider: ' (default: False)"
+    },
+    "attribute-co-authored-by": {
+      "type": "string",
+      "description": "Attribute aider edits using the Co-authored-by trailer in the commit message (default: True). If True, this takes precedence over default --attribute-author and --attribute-committer behavior unless they are explicitly set to True."
+    },
+    "git-commit-verify": {
+      "type": "string",
+      "description": "Enable/disable git pre-commit hooks with --no-verify (default: False)"
+    },
+    "commit": {
+      "type": "boolean",
+      "description": "Commit all pending changes with a suitable commit message, then exit"
+    },
+    "commit-prompt": {
+      "type": "string",
+      "description": "Specify a custom prompt for generating commit messages"
+    },
+    "dry-run": {
+      "type": "string",
+      "description": "Perform a dry run without modifying files (default: False)"
+    },
+    "skip-sanity-check-repo": {
+      "type": "boolean",
+      "description": "Skip the sanity check for the git repository (default: False)"
+    },
+    "watch-files": {
+      "type": "string",
+      "description": "Enable/disable watching files for ai coding comments (default: False)"
+    },
+    "lint": {
+      "type": "boolean",
+      "description": "Lint and fix provided files, or dirty files if none provided"
+    },
+    "lint-cmd": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "description": "Specify lint commands to run for different languages, eg: \"python: flake8 --select=...\" (can be used multiple times)"
+    },
+    "auto-lint": {
+      "type": "string",
+      "description": "Enable/disable automatic linting after changes (default: True)"
+    },
+    "test-cmd": {
+      "type": "string",
+      "description": "Specify command to run tests"
+    },
+    "auto-test": {
+      "type": "string",
+      "description": "Enable/disable automatic testing after changes (default: False)"
+    },
+    "test": {
+      "type": "boolean",
+      "description": "Run tests, fix problems found and then exit"
+    },
+    "analytics": {
+      "type": "string",
+      "description": "Enable/disable analytics for current session (default: random)"
+    },
+    "analytics-disable": {
+      "type": "boolean",
+      "description": "Permanently disable analytics"
+    },
+    "analytics-posthog-host": {
+      "type": "string",
+      "description": "Send analytics to custom PostHog instance"
+    },
+    "analytics-posthog-project-api-key": {
+      "type": "string",
+      "description": "Send analytics to custom PostHog project"
+    },
+    "just-check-update": {
+      "type": "boolean",
+      "description": "Check for updates and return status in the exit code"
+    },
+    "check-update": {
+      "type": "string",
+      "description": "Check for new aider versions on launch"
+    },
+    "show-release-notes": {
+      "type": "string",
+      "description": "Show release notes on first run of new version (default: None, ask user)"
+    },
+    "install-main-branch": {
+      "type": "boolean",
+      "description": "Install the latest version from the main branch"
+    },
+    "upgrade": {
+      "type": "boolean",
+      "description": "Upgrade aider to the latest version from PyPI"
+    },
+    "version": {
+      "type": "string",
+      "description": "Show the version number and exit"
+    },
+    "message": {
+      "type": "string",
+      "description": "Specify a single message to send the LLM, process reply then exit (disables chat mode)"
+    },
+    "gui": {
+      "type": "string",
+      "description": "Run aider in your browser (default: False)"
+    },
+    "copy-paste": {
+      "type": "string",
+      "description": "Enable automatic copy/paste of chat between aider and web UI (default: False)"
+    },
+    "apply-clipboard-edits": {
+      "type": "boolean",
+      "description": "Apply clipboard contents as edits using the main model's editor format"
+    },
+    "exit": {
+      "type": "boolean",
+      "description": "Do all startup activities then exit before accepting user input (debug)"
+    },
+    "show-repo-map": {
+      "type": "boolean",
+      "description": "Print the repo map and exit (debug)"
+    },
+    "show-prompts": {
+      "type": "boolean",
+      "description": "Print the system prompts and exit (debug)"
+    },
+    "voice-format": {
+      "type": "string",
+      "description": "Audio format for voice recording (default: wav). webm and mp3 require ffmpeg",
+      "enum": ["wav", "mp3", "webm"]
+    },
+    "voice-language": {
+      "type": "string",
+      "description": "Specify the language for voice using ISO 639-1 code (default: auto)"
+    },
+    "voice-input-device": {
+      "type": "string",
+      "description": "Specify the input device name for voice recording"
+    },
+    "disable-playwright": {
+      "type": "boolean",
+      "description": "Never prompt for or attempt to install Playwright for web scraping (default: False)."
+    },
+    "vim": {
+      "type": "boolean",
+      "description": "Use VI editing mode in the terminal (default: False)"
+    },
+    "chat-language": {
+      "type": "string",
+      "description": "Specify the language to use in the chat (default: None, uses system settings)"
+    },
+    "commit-language": {
+      "type": "string",
+      "description": "Specify the language to use in the commit message (default: None, user language)"
+    },
+    "yes-always": {
+      "type": "boolean",
+      "description": "Always say yes to every confirmation"
+    },
+    "verbose": {
+      "type": "boolean",
+      "description": "Enable verbose output"
+    },
+    "encoding": {
+      "type": "string",
+      "description": "Specify the encoding for input and output (default: utf-8)"
+    },
+    "line-endings": {
+      "type": "string",
+      "description": "Line endings to use when writing files (default: platform)",
+      "enum": ["platform", "lf", "crlf"]
+    },
+    "suggest-shell-commands": {
+      "type": "string",
+      "description": "Enable/disable suggesting shell commands (default: True)"
+    },
+    "fancy-input": {
+      "type": "string",
+      "description": "Enable/disable fancy input with history and completion (default: True)"
+    },
+    "multiline": {
+      "type": "string",
+      "description": "Enable/disable multi-line input mode with Meta-Enter to submit (default: False)"
+    },
+    "notifications": {
+      "type": "string",
+      "description": "Enable/disable terminal bell notifications when LLM responses are ready (default: False)"
+    },
+    "notifications-command": {
+      "type": "string",
+      "description": "Specify a command to run for notifications instead of the terminal bell. If not specified, a default command for your OS may be used."
+    },
+    "detect-urls": {
+      "type": "string",
+      "description": "Enable/disable detection and offering to add URLs to chat (default: True)"
+    },
+    "editor": {
+      "type": "string",
+      "description": "Specify which editor to use for the /editor command"
+    },
+    "shell-completions": {
+      "type": "string"
+    },
+    "model-settings-file": {
+      "type": "string",
+      "description": "Specify a file with aider model settings for unknown models"
+    },
+    "model-metadata-file": {
+      "type": "string",
+      "description": "Specify a file with context window and costs for unknown models"
+    },
+    "input-history-file": {
+      "type": "string"
+    },
+    "chat-history-file": {
+      "type": "string"
+    },
+    "llm-history-file": {
+      "type": "string",
+      "description": "Log the conversation with the LLM to this file (for example, .aider.llm.history)"
+    },
+    "aiderignore": {
+      "type": "string",
+      "description": "Specify the aider ignore file (default: .aiderignore in git root)"
+    },
+    "analytics-log": {
+      "type": "string",
+      "description": "Specify a file to log analytics events"
+    },
+    "message-file": {
+      "type": "string",
+      "description": "Specify a file containing the message to send the LLM, process reply, then exit (disables chat mode)"
+    },
+    "apply": {
+      "type": "string",
+      "description": "Apply the changes from the given file instead of running the chat (debug)"
+    },
+    "file": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "description": "specify a file to edit (can be used multiple times)"
+    },
+    "read": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "description": "specify a read-only file (can be used multiple times)"
+    },
+    "load": {
+      "type": "string",
+      "description": "Load and execute /commands from a file on launch"
+    },
+    "config": {
+      "type": "string",
+      "description": "Specify the config file (default: search for .aider.conf.yml in git root, cwd or home directory)"
+    },
+    "env-file": {
+      "type": "string",
+      "description": "Specify the .env file to load (default: .env in git root)"
+    }
+  },
+  "additionalProperties": true
+}

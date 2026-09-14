@@ -4,6 +4,8 @@
 //! asks this module for a deliberately small, read-only representation of a
 //! known harness configuration.
 
+mod config_schema;
+
 use notify::{Config as WatchConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
@@ -133,6 +135,8 @@ struct ConfigurationReport {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConfigurationFilePreview {
+    schema_id: Option<String>,
+    schema_issues: Vec<config_schema::SchemaIssue>,
     id: String,
     path: String,
     format: String,
@@ -208,6 +212,8 @@ struct ContextArtifact {
     activation: String,
     path: String,
     external: bool,
+    created_at: Option<u64>,
+    modified_at: Option<u64>,
 }
 
 #[tauri::command]
@@ -373,7 +379,10 @@ fn update_configuration_value(
     expected_revision: String,
 ) -> Result<ConfigurationReport, String> {
     let store = configuration_store_for(&family_id, &runtime_id, &store_id)?;
-    if !matches!(store.format.as_str(), "JSON" | "JSONC" | "YAML" | "YML") {
+    if !matches!(
+        store.format.as_str(),
+        "JSON" | "JSONC" | "YAML" | "YML" | "TOML"
+    ) {
         return Err(format!(
             "{} uses a dedicated configuration writer",
             store.format
@@ -386,6 +395,14 @@ fn update_configuration_value(
         return Err("Sensitive settings cannot be changed through Omni Harness.".into());
     }
 
+    if store.id == "claude-code-state"
+        || store.id.contains("plugins-installed")
+        || store.id.contains("plugin-marketplaces")
+        || store.id == "github-copilot-cli-config-2"
+        || store.id == "github-copilot-cli-config-5"
+    {
+        return Err("This file is managed by the provider and is read-only here.".into());
+    }
     update_structured_configuration(&store, &path, setting_value, &expected_revision)?;
     inspect_configuration(family_id, runtime_id)
 }
@@ -420,11 +437,20 @@ fn set_codex_general_setting(
 ) -> Result<(), String> {
     if !matches!(
         key,
-        "model" | "model_reasoning_effort" | "approval_policy" | "approval_mode" | "personality"
+        "model" | "model_reasoning_effort" | "approval_policy" | "personality"
     ) {
         return Err(format!("Unsupported Codex setting: {key}"));
     }
 
+    let before: serde_json::Value = document
+        .to_string()
+        .parse::<toml::Value>()
+        .ok()
+        .and_then(|v| serde_json::to_value(v).ok())
+        .ok_or("Could not read Codex settings.")?;
+    let mut after = before.clone();
+    after[key] = serde_json::Value::String(setting_value.into());
+    config_schema::validate_change("codex", &before, &after, &[key.into()])?;
     document[key] = value(setting_value);
     Ok(())
 }
@@ -794,6 +820,20 @@ fn scan_opencode_family() -> HarnessFamilySummary {
                     root.join("opencode/opencode.jsonc"),
                     &["CLI"],
                 ),
+                configuration_store(
+                    "opencode-tui-json",
+                    "OpenCode terminal interface",
+                    "JSON",
+                    root.join("opencode/tui.json"),
+                    &["CLI"],
+                ),
+                configuration_store(
+                    "opencode-tui-jsonc",
+                    "OpenCode terminal interface",
+                    "JSONC",
+                    root.join("opencode/tui.jsonc"),
+                    &["CLI"],
+                ),
                 configuration_directory_store(
                     "opencode-global-plugins",
                     "OpenCode local plugins",
@@ -1000,11 +1040,38 @@ fn home_config_stores(id: &str, name: &str, paths: &[(&str, &str)]) -> Vec<Confi
                 &format!("{id}-config-{index}"),
                 &format!("{name} configuration"),
                 format,
-                home.join(path),
+                catalog_config_path(id, &home, path),
                 &["CLI"],
             )
         })
         .collect()
+}
+
+fn catalog_config_path(id: &str, home: &Path, relative: &str) -> PathBuf {
+    let override_path = match id {
+        "github-copilot-cli" if relative == ".copilot/providers.json" => {
+            env::var_os("COPILOT_PROVIDERS_CONFIG").map(PathBuf::from)
+        }
+        _ => None,
+    };
+    if let Some(path) = override_path {
+        return path;
+    }
+    let (variable, prefix) = match id {
+        "github-copilot-cli" => ("COPILOT_HOME", ".copilot/"),
+        "cline" => ("CLINE_DATA_DIR", ".cline/data/"),
+        "goose" => ("XDG_CONFIG_HOME", ".config/"),
+        _ => return home.join(relative),
+    };
+    env::var_os(variable)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .and_then(|root| {
+            relative
+                .strip_prefix(prefix)
+                .map(|suffix| root.join(suffix))
+        })
+        .unwrap_or_else(|| home.join(relative))
 }
 
 fn cli_surface(id: &str, name: &str, executable_names: &[&str]) -> SurfaceSummary {
@@ -1231,7 +1298,11 @@ fn catalog_entries() -> Vec<CatalogEntry> {
             executables: &["cline"],
             applications: &[],
             extensions: &["saoudrizwan.claude-dev", "saoudrizwan.cline", "cline.cline"],
-            home_configs: &[(".cline/mcp.json", "JSON")],
+            home_configs: &[
+                (".cline/data/settings/global-settings.json", "JSON"),
+                (".cline/data/settings/cline_mcp_settings.json", "JSON"),
+                (".cline/data/settings/providers.json", "JSON"),
+            ],
         },
         CatalogEntry {
             id: "warp",
@@ -1451,6 +1522,9 @@ fn catalog_entries() -> Vec<CatalogEntry> {
                 (".copilot/settings.json", "JSONC"),
                 (".copilot/mcp-config.json", "JSON"),
                 (".copilot/config.json", "JSON"),
+                (".copilot/providers.json", "JSON"),
+                (".copilot/lsp-config.json", "JSON"),
+                (".copilot/permissions-config.json", "JSON"),
             ],
         },
         CatalogEntry {
@@ -1682,6 +1756,13 @@ fn toml_display(value: &toml::Value) -> String {
 
 fn redact_toml(value: &toml::Value, key: Option<&str>) -> serde_json::Value {
     if key.is_some_and(is_sensitive_key) {
+        if let Some(table) = value.as_table() {
+            return table
+                .keys()
+                .map(|key| (key.clone(), serde_json::Value::String("[redacted]".into())))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+        }
         return serde_json::Value::String("[redacted]".into());
     }
 
@@ -1737,6 +1818,9 @@ where
 }
 
 fn write_configuration_atomically(path: &Path, content: &str) -> Result<(), String> {
+    let resolved_path = fs::canonicalize(path)
+        .map_err(|error| format!("Could not resolve configuration path: {error}"))?;
+    let path = resolved_path.as_path();
     let metadata = fs::metadata(path)
         .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
     let file_name = path
@@ -1790,6 +1874,9 @@ fn update_structured_configuration(
     setting_value: serde_json::Value,
     expected_revision: &str,
 ) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("A configuration path is required.".into());
+    }
     let content = fs::read_to_string(&store.path)
         .map_err(|error| format!("Could not read {}: {error}", store.path))?;
     if configuration_revision(&content) != expected_revision {
@@ -1797,8 +1884,45 @@ fn update_structured_configuration(
     }
 
     let mut config = parse_structured_configuration(&store.format, &content)?;
-    set_existing_json_value(&mut config, path, setting_value)?;
-    let next_content = serialize_structured_configuration(&store.format, &config)?;
+    let before = config.clone();
+    let schema = config_schema::schema_id(&store.id);
+    let pointer = format!(
+        "/{}",
+        path.iter()
+            .map(|p| p.replace('~', "~0").replace('/', "~1"))
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    if before
+        .pointer(&pointer)
+        .is_some_and(contains_sensitive_value)
+        || contains_sensitive_value(&setting_value)
+    {
+        return Err("Edit individual non-sensitive fields instead of replacing a section containing secrets.".into());
+    }
+    if let Some(schema_id) = schema {
+        if !config_schema::known_root(schema_id, &path[0]) {
+            return Err(
+                "This setting is not in the bundled provider schema. It is preserved read-only."
+                    .into(),
+            );
+        }
+        set_json_value(&mut config, path, setting_value.clone())?;
+        config_schema::validate_change(schema_id, &before, &config, path)?;
+    } else {
+        set_existing_json_value(&mut config, path, setting_value.clone())?;
+    }
+    let next_content = if store.format == "TOML" {
+        let mut document = content.parse::<DocumentMut>().map_err(|e| e.to_string())?;
+        set_toml_value(
+            document.as_item_mut(),
+            path,
+            json_to_toml_item(&setting_value)?,
+        )?;
+        document.to_string()
+    } else {
+        serialize_structured_configuration(&store.format, &config)?
+    };
     write_configuration_atomically(Path::new(&store.path), &next_content)
 }
 
@@ -1807,6 +1931,10 @@ fn parse_structured_configuration(
     content: &str,
 ) -> Result<serde_json::Value, String> {
     match format {
+        "TOML" => content
+            .parse::<toml::Value>()
+            .map_err(|e| e.to_string())
+            .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
         "JSON" => {
             serde_json::from_str(content).map_err(|error| format!("Could not parse JSON: {error}"))
         }
@@ -1892,6 +2020,8 @@ fn matching_scalar_types(current: &serde_json::Value, next: &serde_json::Value) 
 
 fn configuration_file_preview(store: &ConfigurationStore) -> ConfigurationFilePreview {
     let mut preview = ConfigurationFilePreview {
+        schema_id: config_schema::schema_id(&store.id).map(str::to_string),
+        schema_issues: Vec::new(),
         id: store.id.clone(),
         path: store.path.clone(),
         format: store.format.clone(),
@@ -1965,11 +2095,24 @@ fn configuration_file_preview(store: &ConfigurationStore) -> ConfigurationFilePr
         }
     }
 
+    if let Some(id) = &preview.schema_id {
+        // Validate original data before redaction changes sensitive values into strings.
+        if let Ok(value) = parse_structured_configuration(&store.format, &content) {
+            preview.schema_issues = config_schema::issues(id, &value);
+        }
+    }
     preview
 }
 
 fn redact_json(value: &serde_json::Value, key: Option<&str>) -> serde_json::Value {
     if key.is_some_and(is_sensitive_key) {
+        if let Some(object) = value.as_object() {
+            return object
+                .keys()
+                .map(|key| (key.clone(), serde_json::Value::String("[redacted]".into())))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+        }
         return serde_json::Value::String("[redacted]".into());
     }
 
@@ -1991,18 +2134,115 @@ fn redact_json(value: &serde_json::Value, key: Option<&str>) -> serde_json::Valu
 }
 
 fn is_sensitive_key(key: &str) -> bool {
-    let normalized = key.to_ascii_lowercase();
+    let normalized = key.to_ascii_lowercase().replace(['-', '_'], "");
     [
-        "token",
+        "apikey",
         "secret",
         "password",
-        "api_key",
-        "apikey",
         "authorization",
-        "credential",
+        "accesstoken",
+        "refreshtoken",
+        "authtoken",
+        "bearertoken",
+        "privatekey",
+        "passphrase",
     ]
     .iter()
     .any(|needle| normalized.contains(needle))
+        || matches!(
+            normalized.as_str(),
+            "token"
+                | "credentials"
+                | "credential"
+                | "env"
+                | "envs"
+                | "environment"
+                | "headers"
+                | "httpheaders"
+                | "setenv"
+        )
+}
+
+fn contains_sensitive_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object
+            .iter()
+            .any(|(key, value)| is_sensitive_key(key) || contains_sensitive_value(value)),
+        serde_json::Value::Array(values) => values.iter().any(contains_sensitive_value),
+        serde_json::Value::String(value) => value == "[redacted]",
+        _ => false,
+    }
+}
+
+fn set_json_value(
+    current: &mut serde_json::Value,
+    path: &[String],
+    next: serde_json::Value,
+) -> Result<(), String> {
+    let (head, tail) = path
+        .split_first()
+        .ok_or("A configuration path is required.")?;
+    match current {
+        serde_json::Value::Object(object) => {
+            if tail.is_empty() {
+                object.insert(head.clone(), next);
+                return Ok(());
+            }
+            let child = object
+                .entry(head.clone())
+                .or_insert_with(|| serde_json::json!({}));
+            set_json_value(child, tail, next)
+        }
+        serde_json::Value::Array(values) => {
+            let index = head.parse::<usize>().map_err(|_| "Invalid list index.")?;
+            let child = values.get_mut(index).ok_or("List index is out of range.")?;
+            if tail.is_empty() {
+                *child = next;
+                Ok(())
+            } else {
+                set_json_value(child, tail, next)
+            }
+        }
+        _ => Err("The parent setting is not a collection.".into()),
+    }
+}
+
+fn json_to_toml_item(value: &serde_json::Value) -> Result<toml_edit::Item, String> {
+    // Parse a one-value TOML document to support arrays, inline tables and scalars.
+    let wrapped = serde_json::json!({"setting": value});
+    let text = toml::to_string(&wrapped)
+        .map_err(|e| format!("Value cannot be represented in TOML: {e}"))?;
+    let mut document = text.parse::<DocumentMut>().map_err(|e| e.to_string())?;
+    Ok(document.remove("setting").ok_or("Missing TOML value.")?)
+}
+
+fn set_toml_value(
+    current: &mut toml_edit::Item,
+    path: &[String],
+    next: toml_edit::Item,
+) -> Result<(), String> {
+    let (head, tail) = path
+        .split_first()
+        .ok_or("A configuration path is required.")?;
+    if current.is_none() {
+        *current = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    if let Some(table) = current.as_table_like_mut() {
+        if tail.is_empty() {
+            table.insert(head, next);
+            return Ok(());
+        }
+        if !table.contains_key(head) {
+            table.insert(head, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        return set_toml_value(
+            table.get_mut(head).ok_or("Missing TOML parent.")?,
+            tail,
+            next,
+        );
+    }
+    // Array elements are edited through their containing array, preserving all other sections.
+    Err("Edit the containing TOML list to change this entry.".into())
 }
 
 #[derive(Serialize)]
@@ -2585,6 +2825,20 @@ fn add_context_artifact(
     if !seen.insert(key.clone()) {
         return;
     }
+    let metadata = fs::metadata(&canonical_path).ok();
+    let timestamp = |time: SystemTime| {
+        time.duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs())
+    };
+    let created_at = metadata
+        .as_ref()
+        .and_then(|meta| meta.created().ok())
+        .and_then(timestamp);
+    let modified_at = metadata
+        .as_ref()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(timestamp);
     artifacts.push(ContextArtifact {
         id: context_artifact_id(&key),
         provider: provider.into(),
@@ -2594,6 +2848,8 @@ fn add_context_artifact(
         activation: activation.into(),
         path: path_string,
         external: !canonical_path.starts_with(project_root),
+        created_at,
+        modified_at,
     });
 }
 
@@ -2929,6 +3185,90 @@ command = "example-mcp"
             configuration_revision("model = \"a\""),
             configuration_revision("model = \"b\"")
         );
+    }
+
+    #[test]
+    fn structured_writer_validates_additions_preserves_secrets_and_rejects_stale_edits() {
+        let root = env::temp_dir().join(format!("omni-schema-write-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let original = r#"{"model":"sonnet","env":{"KEY":"secret-value"},"futureSetting":true}"#;
+        fs::write(&path, original).unwrap();
+        let store = configuration_store("claude-code-settings", "test", "JSON", path.clone(), &[]);
+        let revision = configuration_revision(original);
+        assert!(update_structured_configuration(
+            &store,
+            &["cleanupPeriodDays".into()],
+            serde_json::json!(0),
+            &revision
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        update_structured_configuration(
+            &store,
+            &["permissions".into(), "allow".into()],
+            serde_json::json!(["Bash(npm test)"]),
+            &revision,
+        )
+        .unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(parsed["env"]["KEY"], "secret-value");
+        assert_eq!(parsed["futureSetting"], true);
+        assert_eq!(parsed["permissions"]["allow"][0], "Bash(npm test)");
+        assert!(update_structured_configuration(
+            &store,
+            &["model".into()],
+            serde_json::json!("opus"),
+            &revision
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn toml_writer_supports_nested_options_lists_and_preserves_other_sections() {
+        let root = env::temp_dir().join(format!("omni-toml-write-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.toml");
+        let original = "# keep this comment\nmodel = \"example\"\n\n[mcp_servers.demo]\ncommand = \"demo\" # keep server\n";
+        fs::write(&path, original).unwrap();
+        let store = configuration_store("codex-home", "test", "TOML", path.clone(), &[]);
+        update_structured_configuration(
+            &store,
+            &["project_doc_fallback_filenames".into()],
+            serde_json::json!(["TEAM.md", "GUIDE.md"]),
+            &configuration_revision(original),
+        )
+        .unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# keep this comment"));
+        assert!(saved.contains("# keep server"));
+        let parsed: toml::Value = saved.parse().unwrap();
+        assert_eq!(
+            parsed["project_doc_fallback_filenames"][1].as_str(),
+            Some("GUIDE.md")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sensitive_containers_cannot_be_overwritten_and_budgets_are_visible() {
+        assert!(contains_sensitive_value(
+            &serde_json::json!({"env":{"KEY":"value"}})
+        ));
+        assert!(contains_sensitive_value(
+            &serde_json::json!({"nested":[{"api-key":"value"}]})
+        ));
+        assert!(!is_sensitive_key("tool_output_token_limit"));
+        assert!(!is_sensitive_key("cli_auth_credentials_store"));
+        let redacted = redact_json(
+            &serde_json::json!({"env":{"UNUSUAL_NAME":"value"},"maxTokens":500}),
+            None,
+        );
+        assert_eq!(redacted["env"]["UNUSUAL_NAME"], "[redacted]");
+        assert_eq!(redacted["maxTokens"], 500);
     }
 
     #[test]

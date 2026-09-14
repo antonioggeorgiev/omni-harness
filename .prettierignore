@@ -5,3 +5,5 @@ src-tauri/Cargo.lock
 pnpm-lock.yaml
 public
 src-tauri/icons
+
+src-tauri/gen/

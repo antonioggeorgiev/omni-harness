@@ -27,6 +27,7 @@ json5 = "0.4"
 serde_yaml = "0.9"
 notify = "7"
 tauri-plugin-dialog = "2"
+jsonschema = { version = "0.56.0", default-features = false }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
