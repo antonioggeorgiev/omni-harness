@@ -25,7 +25,7 @@ toml = "0.8"
 toml_edit = "0.22"
 json5 = "0.4"
 serde_yaml = "0.9"
-notify = "7"
+notify = "8"
 tauri-plugin-dialog = "2"
 jsonschema = { version = "0.56.0", default-features = false }
 
