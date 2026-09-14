@@ -173,8 +173,7 @@ function App() {
     [scanResult],
   );
   const savedConfigurationTargets = useMemo(
-    () =>
-      discoveredConfigurationTargets.filter((target) => managedHarnessIds.includes(target.id)),
+    () => discoveredConfigurationTargets.filter((target) => managedHarnessIds.includes(target.id)),
     [discoveredConfigurationTargets, managedHarnessIds],
   );
 
@@ -678,7 +677,9 @@ function DetectionLab({
   );
   const managedTargets = useMemo(
     () =>
-      configurationTargetsFromScan(result).filter((target) => managedHarnessIds.includes(target.id)),
+      configurationTargetsFromScan(result).filter((target) =>
+        managedHarnessIds.includes(target.id),
+      ),
     [managedHarnessIds, result],
   );
   const availableDetectedFamilies = useMemo(
@@ -734,10 +735,7 @@ function DetectionLab({
               <ScanStat label="Configured runtimes" value={configuredRuntimes} />
             </section>
 
-            <ManagedHarnesses
-              onRemove={onRemoveConfiguration}
-              targets={managedTargets}
-            />
+            <ManagedHarnesses onRemove={onRemoveConfiguration} targets={managedTargets} />
 
             <section className="mt-8" aria-labelledby="detected-heading">
               <div className="mb-3 flex items-baseline justify-between gap-4">
@@ -846,7 +844,9 @@ function ManagedHarnesses({
                       <Icon className="size-[18px]" />
                     </span>
                     <div className="min-w-0">
-                      <p className="text-xs font-medium text-muted-foreground">{presentation.label}</p>
+                      <p className="text-xs font-medium text-muted-foreground">
+                        {presentation.label}
+                      </p>
                       <h3 className="mt-0.5 truncate text-sm font-semibold">{target.name}</h3>
                     </div>
                   </div>
