@@ -995,14 +995,14 @@ function RuntimeRow({
         <div className="mt-4 flex justify-end">
           <button
             aria-label={`Add ${runtimePresentation.label} to OmniHarness`}
-            className="group inline-flex h-7 items-center gap-1.5 rounded-full bg-primary py-1 pr-2.5 pl-1 text-[11px] font-semibold text-primary-foreground shadow-[0_1px_2px_oklch(0_0_0/0.16),inset_0_0_0_1px_oklch(1_0_0/0.14)] transition-[filter,transform,box-shadow] hover:brightness-110 hover:shadow-[0_2px_5px_oklch(0_0_0/0.2),inset_0_0_0_1px_oklch(1_0_0/0.18)] active:translate-y-px disabled:cursor-default disabled:opacity-60"
+            className="group inline-flex h-6 items-center gap-1 rounded-full bg-primary py-0.5 pr-2 pl-0.5 text-[11px] font-semibold text-primary-foreground shadow-[0_1px_2px_oklch(0_0_0/0.16),inset_0_0_0_1px_oklch(1_0_0/0.14)] transition-[filter,transform,box-shadow] hover:brightness-110 hover:shadow-[0_2px_5px_oklch(0_0_0/0.2),inset_0_0_0_1px_oklch(1_0_0/0.18)] active:translate-y-px disabled:cursor-not-allowed disabled:opacity-60"
             disabled={saved}
             onClick={() => onAddConfiguration(configurationTarget(family, runtime))}
             title={`Add ${runtimePresentation.label} to OmniHarness`}
             type="button"
           >
-            <span className="grid size-5 place-items-center rounded-full bg-white/15 transition-colors group-hover:bg-white/20">
-              <Plus className="size-3" strokeWidth={2.75} />
+            <span className="grid size-4 place-items-center rounded-full bg-white/15 transition-colors group-hover:bg-white/20">
+              <Plus className="size-2.5" strokeWidth={2.75} />
             </span>
             {saved ? "Managed in Omni Harness" : "Add to Omni Harness"}
           </button>
