@@ -2,7 +2,7 @@
 
 Omni Harness is a local-first desktop inventory for AI development harnesses and the tools they connect to.
 
-The initial release inspects Codex CLI's `~/.codex/config.toml` without modifying it. It discovers the CLI, extracts configured MCP servers and selected settings, shows their relationships, and redacts secret-like values before returning data to the frontend.
+The inspection core currently reads Codex CLI's `~/.codex/config.toml` without modifying it. It discovers the CLI, extracts configured MCP servers and selected settings, and redacts secret-like values before returning data to the frontend. The product interface will be designed incrementally rather than generated from a boilerplate layout.
 
 ## Development
 
