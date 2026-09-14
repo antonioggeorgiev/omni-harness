@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   AppWindow,
@@ -11,6 +12,7 @@ import {
   Command,
   FileText,
   FolderCog,
+  FolderTree,
   Moon,
   Plus,
   Radar,
@@ -20,11 +22,18 @@ import {
   Sun,
   Terminal,
   Trash2,
+  User,
+  Shield,
+  Eye,
+  Pencil,
+  X,
+  ExternalLink,
+  Clock,
 } from "lucide-react";
 import { Switch } from "./components/ui/switch";
 import { getFamilyPresentation, getRuntimePresentation } from "./harness-registry";
 
-type Screen = "configuration" | "home" | "detection" | "settings";
+type Screen = "configuration" | "home" | "detection" | "projects" | "settings";
 type Theme = "light" | "dark";
 type HarnessStatus = "configured" | "installed" | "attention" | "not-detected";
 
@@ -74,6 +83,31 @@ interface ScanResult {
   scannedAt: number;
 }
 
+interface ManagedProject {
+  id: string;
+  name: string;
+  path: string;
+  workspaceRoot?: string;
+}
+
+interface ContextArtifact {
+  id: string;
+  provider: string;
+  kind: "instruction" | "skill" | "rule" | "command";
+  scope: string;
+  state: "active" | "conditional" | "shadowed";
+  activation: string;
+  path: string;
+  external: boolean;
+}
+
+interface ProjectContextReport {
+  root: string;
+  workspaceRoot: string;
+  scannedAt: number;
+  artifacts: ContextArtifact[];
+}
+
 interface ConfigurationFilePreview {
   id: string;
   path: string;
@@ -111,13 +145,31 @@ const configurationTabs: { id: ConfigurationTabId; label: string }[] = [
   { id: "general", label: "General" },
   { id: "features", label: "Features" },
   { id: "plugins", label: "Plugins" },
-  { id: "projects", label: "Projects" },
+  { id: "projects", label: "Project config" },
   { id: "environment", label: "Environment" },
   { id: "system", label: "System" },
 ];
 
 const lastOpenedConfigurationKey = "last-opened-configuration-id";
 const configurationTabsByTargetKey = "configuration-tabs-by-target";
+const managedProjectsKey = "managed-projects";
+const lastOpenedScreenKey = "last-opened-screen";
+const lastOpenedProjectKey = "last-opened-project-id";
+
+function storedLastOpenedScreen(): Screen {
+  const stored = localStorage.getItem(lastOpenedScreenKey);
+  switch (stored) {
+    case "configuration":
+    case "home":
+    case "detection":
+    case "projects":
+    case "settings":
+      return stored;
+    default:
+      // Preserve the previous harness-only restoration for existing installations.
+      return storedLastOpenedConfiguration() ? "configuration" : "home";
+  }
+}
 
 function storedLastOpenedConfiguration() {
   return localStorage.getItem(lastOpenedConfigurationKey) ?? undefined;
@@ -164,6 +216,25 @@ function removeStoredConfiguration(targetId: string) {
   if (targetId in tabsByTarget) {
     delete tabsByTarget[targetId];
     localStorage.setItem(configurationTabsByTargetKey, JSON.stringify(tabsByTarget));
+  }
+}
+
+function storedProjects(): ManagedProject[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(managedProjectsKey) ?? "[]");
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter(
+      (project): project is ManagedProject =>
+        typeof project === "object" &&
+        project !== null &&
+        typeof project.id === "string" &&
+        typeof project.name === "string" &&
+        typeof project.path === "string",
+    );
+  } catch {
+    return [];
   }
 }
 
@@ -214,9 +285,7 @@ const statusPresentation: Record<
 };
 
 function App() {
-  const [screen, setScreen] = useState<Screen>(() =>
-    storedLastOpenedConfiguration() ? "configuration" : "home",
-  );
+  const [screen, setScreen] = useState<Screen>(storedLastOpenedScreen);
   const [scanResult, setScanResult] = useState<ScanResult>();
   const [scanError, setScanError] = useState<string>();
   const [selectedConfiguration, setSelectedConfiguration] = useState<string | undefined>(
@@ -233,10 +302,34 @@ function App() {
       return [];
     }
   });
+  const [managedHarnessesOpen, setManagedHarnessesOpen] = useState(
+    () => localStorage.getItem("managed-harnesses-open") !== "false",
+  );
+  const [projects, setProjects] = useState<ManagedProject[]>(storedProjects);
+  const [projectsOpen, setProjectsOpen] = useState(
+    () => localStorage.getItem("projects-open") !== "false",
+  );
+  const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(() => {
+    const storedId = localStorage.getItem(lastOpenedProjectKey);
+    return projects.find((project) => project.id === storedId)?.id ?? projects[0]?.id;
+  });
+  const [projectImportRequest, setProjectImportRequest] = useState(0);
   const [theme, setTheme] = useState<Theme>(() => {
     const savedTheme = localStorage.getItem("theme");
     return savedTheme === "dark" ? "dark" : "light";
   });
+
+  useEffect(() => {
+    localStorage.setItem(lastOpenedScreenKey, screen);
+  }, [screen]);
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      localStorage.setItem(lastOpenedProjectKey, selectedProjectId);
+    } else {
+      localStorage.removeItem(lastOpenedProjectKey);
+    }
+  }, [selectedProjectId]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -292,9 +385,19 @@ function App() {
     setScreen("configuration");
   }, []);
 
+  const updateProjects = useCallback((next: ManagedProject[]) => {
+    setProjects(next);
+    localStorage.setItem(managedProjectsKey, JSON.stringify(next));
+  }, []);
+
+  const openProject = useCallback((project: ManagedProject) => {
+    setSelectedProjectId(project.id);
+    setScreen("projects");
+  }, []);
+
   return (
     <div className="flex h-dvh overflow-hidden bg-background">
-      <aside className="flex h-full w-[248px] shrink-0 flex-col overflow-y-auto border-r bg-card px-3 py-4">
+      <aside className="sidebar flex h-full w-[264px] shrink-0 flex-col border-r bg-card px-3 py-4">
         <button
           aria-label="Go to overview"
           className="flex items-center gap-2.5 px-2 text-left"
@@ -306,38 +409,126 @@ function App() {
           <span className="text-[15px] font-semibold tracking-[-0.02em]">OmniHarness</span>
         </button>
 
-        <nav className="mt-8" aria-label="Primary navigation">
-          <p className="px-2 text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground">
-            Managed harnesses
-          </p>
-          <ConfigurationNavigation
-            onOpen={openConfiguration}
-            selectedId={screen === "configuration" ? selectedConfiguration : undefined}
-            targets={savedConfigurationTargets}
-          />
-
-          <p className="mt-7 px-2 text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground">
-            Testing
-          </p>
+        <nav className="mt-7 min-h-0 flex-1 overflow-y-auto pb-5" aria-label="Primary navigation">
           <button
-            aria-current={screen === "detection" ? "page" : undefined}
-            className={`mt-2 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors ${
-              screen === "detection"
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground"
-            }`}
-            onClick={() => setScreen("detection")}
+            aria-controls="managed-harnesses-navigation"
+            aria-expanded={managedHarnessesOpen}
+            className="sidebar-section-heading flex w-full items-center gap-2 px-2 text-left"
+            onClick={() => {
+              setManagedHarnessesOpen((current) => {
+                const next = !current;
+                localStorage.setItem("managed-harnesses-open", String(next));
+                return next;
+              });
+            }}
+            type="button"
           >
-            <Radar className="size-[17px]" />
-            Detection Lab
+            <ChevronDown
+              className={`size-3.5 transition-transform ${managedHarnessesOpen ? "" : "-rotate-90"}`}
+            />
+            <span className="flex-1">Harnesses</span>
+            {savedConfigurationTargets.length > 0 && (
+              <span className="sidebar-count">{savedConfigurationTargets.length}</span>
+            )}
           </button>
+          {managedHarnessesOpen && (
+            <div id="managed-harnesses-navigation">
+              <ConfigurationNavigation
+                onOpen={openConfiguration}
+                selectedId={screen === "configuration" ? selectedConfiguration : undefined}
+                targets={savedConfigurationTargets}
+              />
+            </div>
+          )}
+
+          <div className="mt-6 border-t pt-5">
+            <div className="flex items-center gap-1 px-2">
+              <button
+                aria-controls="projects-navigation"
+                aria-expanded={projectsOpen}
+                className="sidebar-section-heading flex min-w-0 flex-1 items-center gap-2 text-left"
+                onClick={() => {
+                  setProjectsOpen((current) => {
+                    const next = !current;
+                    localStorage.setItem("projects-open", String(next));
+                    return next;
+                  });
+                }}
+                type="button"
+              >
+                <ChevronDown
+                  className={`size-3.5 shrink-0 transition-transform ${projectsOpen ? "" : "-rotate-90"}`}
+                />
+                <span className="min-w-0 flex-1">Projects</span>
+                {projects.length > 0 && <span className="sidebar-count">{projects.length}</span>}
+              </button>
+              <button
+                aria-label="Import project folder"
+                className="grid size-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                onClick={() => {
+                  setScreen("projects");
+                  setProjectImportRequest((current) => current + 1);
+                }}
+                title="Import project folder"
+                type="button"
+              >
+                <Plus className="size-3.5" />
+              </button>
+            </div>
+            {projectsOpen && (
+              <div className="mt-2 space-y-0.5" id="projects-navigation">
+                {projects.length > 0 ? (
+                  projects.map((project) => (
+                    <button
+                      aria-current={
+                        screen === "projects" && selectedProjectId === project.id
+                          ? "page"
+                          : undefined
+                      }
+                      className={`sidebar-project flex w-full min-w-0 items-center gap-2 rounded-md px-2.5 py-2 text-left text-[13px] font-normal transition-colors ${
+                        screen === "projects" && selectedProjectId === project.id
+                          ? "bg-accent text-accent-foreground"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      }`}
+                      key={project.id}
+                      onClick={() => openProject(project)}
+                      title={project.path}
+                      type="button"
+                    >
+                      <FolderTree className="size-4 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                    </button>
+                  ))
+                ) : (
+                  <p className="px-2 text-xs leading-5 text-muted-foreground">
+                    No projects imported.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-6 border-t pt-3">
+            <button
+              aria-current={screen === "detection" ? "page" : undefined}
+              className={`mt-2 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors ${
+                screen === "detection"
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+              onClick={() => setScreen("detection")}
+            >
+              <Radar className="size-[17px]" />
+              Detection Lab
+            </button>
+          </div>
         </nav>
 
-        <div className="mt-auto border-t pt-3">
+        <div className="shrink-0 border-t pt-3">
           <button
             aria-current={screen === "settings" ? "page" : undefined}
             aria-label="Settings"
-            className={`grid size-9 place-items-center rounded-md transition-colors ${
+            className={`flex min-h-10 w-full items-center gap-2.5 rounded-md px-2.5 text-sm font-medium transition-colors ${
               screen === "settings"
                 ? "bg-accent text-accent-foreground"
                 : "text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -345,6 +536,7 @@ function App() {
             onClick={() => setScreen("settings")}
           >
             <Settings className="size-[17px]" />
+            Settings
           </button>
         </div>
       </aside>
@@ -367,6 +559,15 @@ function App() {
             onScanResult={setScanResult}
             managedHarnessIds={managedHarnessIds}
             setScanError={setScanError}
+          />
+        )}
+        {screen === "projects" && (
+          <ProjectsPage
+            importRequest={projectImportRequest}
+            onSelectProject={setSelectedProjectId}
+            projects={projects}
+            selectedId={selectedProjectId}
+            setProjects={updateProjects}
           />
         )}
         {screen === "settings" && <SettingsPage theme={theme} setTheme={setTheme} />}
@@ -416,7 +617,7 @@ function ConfigurationNavigation({
   }
 
   return (
-    <div className="mt-2 space-y-1">
+    <div className="mt-2 space-y-2">
       {targetsByProvider.map(({ presentation, targets: providerTargets }) => {
         const groupId = presentation.groupId ?? providerTargets[0].familyId;
         const isOpen = expandedProviders[groupId] ?? true;
@@ -470,7 +671,7 @@ function ConfigurationProviderGroup({
       <button
         aria-controls={contentId}
         aria-expanded={isOpen}
-        className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        className="flex min-h-10 w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm font-semibold text-foreground transition-colors hover:bg-muted"
         onClick={onToggle}
         type="button"
       >
@@ -482,10 +683,9 @@ function ConfigurationProviderGroup({
       </button>
 
       {isOpen && (
-        <div className="mt-1 ml-[19px] space-y-0.5 border-l border-border/80 pl-2" id={contentId}>
+        <div className="mt-0.5 ml-[18px] space-y-0.5 border-l border-border pl-3" id={contentId}>
           {targets.map((target) => (
             <ConfigurationNavItem
-              compact
               key={target.id}
               onOpen={onOpen}
               selected={selectedId === target.id}
@@ -499,12 +699,10 @@ function ConfigurationProviderGroup({
 }
 
 function ConfigurationNavItem({
-  compact = false,
   onOpen,
   selected,
   target,
 }: {
-  compact?: boolean;
   onOpen: (target: ConfigurationTarget) => void;
   selected: boolean;
   target: ConfigurationTarget;
@@ -512,9 +710,7 @@ function ConfigurationNavItem({
   return (
     <button
       aria-current={selected ? "page" : undefined}
-      className={`flex w-full items-center rounded-md py-2 text-left text-sm font-medium transition-colors ${
-        compact ? "gap-2 px-2" : "gap-2.5 px-2.5"
-      } ${
+      className={`sidebar-child flex min-h-9 w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors ${
         selected
           ? "bg-accent text-accent-foreground"
           : "text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -523,9 +719,689 @@ function ConfigurationNavItem({
       type="button"
     >
       <span className="min-w-0 flex-1 truncate">{target.name}</span>
-      <ChevronRight className="size-3.5 shrink-0 opacity-50" />
     </button>
   );
+}
+
+function ProjectsPage({
+  importRequest,
+  onSelectProject,
+  projects,
+  selectedId,
+  setProjects,
+}: {
+  importRequest: number;
+  onSelectProject: (id?: string) => void;
+  projects: ManagedProject[];
+  selectedId?: string;
+  setProjects: (projects: ManagedProject[]) => void;
+}) {
+  const [report, setReport] = useState<ProjectContextReport>();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>();
+  const selectedProject = projects.find((project) => project.id === selectedId) ?? projects[0];
+
+  const scanProject = useCallback(
+    async (project: ManagedProject) => {
+      if (!("__TAURI_INTERNALS__" in window)) {
+        setError("Open OmniHarness as a desktop app to inspect a local project.");
+        return;
+      }
+      setLoading(true);
+      setError(undefined);
+      try {
+        const next = await invoke<ProjectContextReport>("scan_project_context", {
+          projectPath: project.path,
+        });
+        setReport(next);
+        const current = projects.find((item) => item.id === project.id);
+        if (
+          current &&
+          (current.path !== next.root || current.workspaceRoot !== next.workspaceRoot)
+        ) {
+          setProjects(
+            projects.map((item) =>
+              item.id === project.id
+                ? { ...item, path: next.root, workspaceRoot: next.workspaceRoot }
+                : item,
+            ),
+          );
+        }
+      } catch (reason) {
+        setReport(undefined);
+        setError(reason instanceof Error ? reason.message : String(reason));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [projects, setProjects],
+  );
+
+  useEffect(() => {
+    if (selectedProject) {
+      void scanProject(selectedProject);
+    } else {
+      setReport(undefined);
+    }
+  }, [selectedProject?.id, scanProject]);
+
+  const importProject = useCallback(async () => {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      setError("Folder import is available in the OmniHarness desktop app.");
+      return;
+    }
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Import project folder",
+      });
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      if (!path) {
+        return;
+      }
+      setLoading(true);
+      setError(undefined);
+      const next = await invoke<ProjectContextReport>("scan_project_context", {
+        projectPath: path,
+      });
+      const existing = projects.find((project) => project.path === next.root);
+      const project =
+        existing ??
+        ({
+          id: next.root,
+          name: next.root.split(/[\\/]/).filter(Boolean).pop() ?? "Imported project",
+          path: next.root,
+          workspaceRoot: next.workspaceRoot,
+        } satisfies ManagedProject);
+      if (!existing) {
+        setProjects([...projects, project]);
+      }
+      onSelectProject(project.id);
+      setReport(next);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, [onSelectProject, projects, setProjects]);
+
+  useEffect(() => {
+    if (importRequest > 0) {
+      void importProject();
+    }
+  }, [importProject, importRequest]);
+
+  const removeProject = useCallback(
+    (project: ManagedProject) => {
+      const next = projects.filter((item) => item.id !== project.id);
+      setProjects(next);
+      onSelectProject(next[0]?.id);
+      setReport(undefined);
+    },
+    [onSelectProject, projects, setProjects],
+  );
+
+  return (
+    <div className="mx-auto max-w-6xl px-8 py-8 sm:px-12">
+      {projects.length === 0 ? (
+        <div className="rounded-xl border border-dashed px-6 py-14 text-center">
+          <FolderCog className="mx-auto size-8 text-muted-foreground" />
+          <h2 className="mt-4 font-semibold">Import a folder to map its agent context</h2>
+          <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+            OmniHarness will inventory project files and the applicable user and system context
+            without modifying them.
+          </p>
+        </div>
+      ) : (
+        <section className="min-w-0">
+          {selectedProject && (
+            <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-secondary text-secondary-foreground">
+                  <FolderTree className="size-5" />
+                </span>
+                <h1 className="truncate text-2xl font-semibold tracking-[-0.035em]">
+                  {selectedProject.name}
+                </h1>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  className="inline-flex min-h-9 items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted disabled:opacity-60"
+                  disabled={loading}
+                  onClick={() => void scanProject(selectedProject)}
+                  type="button"
+                >
+                  <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+                  Rescan
+                </button>
+                <button
+                  aria-label={`Remove ${selectedProject.name}`}
+                  className="grid size-9 place-items-center rounded-md border border-red-500/30 text-red-500 hover:bg-red-500/10"
+                  onClick={() => removeProject(selectedProject)}
+                  title="Remove imported project"
+                  type="button"
+                >
+                  <Trash2 className="size-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {error && (
+            <div className="mb-5 flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-800 dark:text-amber-200">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+              <p>{error}</p>
+            </div>
+          )}
+          {loading && !report && <ConfigurationSkeleton />}
+          {report && (
+            <ProjectContextInventory
+              report={report}
+              onRefresh={() => selectedProject && void scanProject(selectedProject)}
+            />
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function ProjectContextInventory({
+  report,
+  onRefresh,
+}: {
+  report: ProjectContextReport;
+  onRefresh: () => void;
+}) {
+  const [documentItem, setDocumentItem] = useState<ContextArtifact>();
+  const scopeName = (item: ContextArtifact) => (item.scope === "Nested" ? "Project" : item.scope);
+  const [selectedProvider, setSelectedProvider] = useState("");
+  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState("all");
+  const [status, setStatus] = useState("all");
+  const [expandedScopes, setExpandedScopes] = useState<Record<string, boolean>>({});
+  const providers = [...new Set(report.artifacts.map((item) => item.provider))];
+  const provider = providers.includes(selectedProvider) ? selectedProvider : providers[0];
+  const providerArtifacts = report.artifacts.filter((item) => item.provider === provider);
+  const visible = providerArtifacts.filter(
+    (item) =>
+      (kind === "all" || item.kind === kind) &&
+      (status === "all" ||
+        (status === "conditional" ? item.state === "conditional" : item.state !== "conditional")) &&
+      `${contextItemName(item)} ${item.path} ${item.scope}`
+        .toLowerCase()
+        .includes(query.toLowerCase()),
+  );
+  const scopes = [...new Set(visible.map(scopeName))];
+  const providerFamilies: Record<string, string> = {
+    Codex: "codex",
+    "Claude Code": "claude",
+    "Gemini CLI": "gemini-cli",
+  };
+
+  return (
+    <div className="space-y-6">
+      <div aria-label="Context providers" className="flex flex-wrap gap-2 border-b pb-5">
+        {providers.map((name) => {
+          const Icon = getFamilyPresentation(providerFamilies[name] ?? name, name).icon;
+          const count = report.artifacts.filter((item) => item.provider === name).length;
+          return (
+            <button
+              aria-pressed={provider === name}
+              className={`inline-flex items-center gap-2.5 rounded-lg px-4 py-3 text-sm font-medium transition-colors ${provider === name ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
+              key={name}
+              onClick={() => setSelectedProvider(name)}
+              type="button"
+            >
+              <Icon className="size-5" />
+              {name}
+              <span className="ml-1 text-xs tabular-nums opacity-60">{count}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div aria-label="Context type" className="flex flex-wrap gap-1">
+          {[
+            ["all", "All"],
+            ["skill", "Skills"],
+            ["instruction", "Instructions"],
+            ["rule", "Rules"],
+            ["command", "Commands"],
+          ].map(([value, label]) => (
+            <button
+              aria-pressed={kind === value}
+              className={`rounded-md px-3 py-1.5 text-sm transition-colors ${kind === value ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+              key={value}
+              onClick={() => setKind(value)}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="flex w-full items-center gap-2 sm:w-auto">
+          <ContextStatusFilter value={status} onChange={setStatus} />
+          <input
+            aria-label="Search context"
+            className="h-9 w-full rounded-md border bg-card px-3 text-sm outline-none focus:ring-2 focus:ring-ring sm:w-60"
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search by name or path…"
+            type="search"
+            value={query}
+          />
+        </div>
+      </div>
+
+      {visible.length === 0 && (
+        <p className="rounded-lg border border-dashed px-6 py-12 text-center text-sm text-muted-foreground">
+          {report.artifacts.length === 0 ? "No context files found." : "No matching context files."}
+        </p>
+      )}
+
+      {documentItem && (
+        <ContextEditor
+          key={documentItem.id}
+          item={documentItem}
+          root={report.root}
+          onClose={() => setDocumentItem(undefined)}
+          onRefresh={onRefresh}
+        />
+      )}
+      {scopes.map((scope) => {
+        const entries = visible.filter((item) => scopeName(item) === scope);
+        const ScopeIcon =
+          scope === "User" ? User : scope === "Project" || scope === "Local" ? FolderTree : Shield;
+        return (
+          <details className="group/scope" key={`${provider}:${scope}`} open>
+            <summary className="flex items-center gap-2 py-2 text-sm font-medium text-muted-foreground list-none [&::-webkit-details-marker]:hidden">
+              <ChevronRight className="size-3.5 transition-transform group-open/scope:rotate-90" />
+              <ScopeIcon className="size-4" />
+              <span
+                title={
+                  scope === "User"
+                    ? "Your personal context, shared across all projects."
+                    : undefined
+                }
+              >
+                {scope === "User" ? "Global · User" : scope}
+              </span>
+              <span className="text-xs tabular-nums opacity-60">{entries.length}</span>
+            </summary>
+            <div className="mt-2 overflow-hidden rounded-xl border bg-card">
+              {(expandedScopes[provider + scope] ? entries : entries.slice(0, 5)).map((item) => (
+                <div
+                  className="flex items-center gap-3 border-b px-4 py-3 last:border-b-0"
+                  key={item.id}
+                >
+                  <span className="grid size-8 shrink-0 place-items-center rounded-md bg-secondary text-muted-foreground">
+                    {item.kind === "skill" ? (
+                      <Code2 className="size-4" />
+                    ) : (
+                      <FileText className="size-4" />
+                    )}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium">{contextItemName(item)}</span>
+                      <span className="inline-flex items-center gap-1 rounded bg-blue-500/10 px-2 py-0.5 text-xs capitalize text-blue-600 dark:text-blue-300">
+                        <FileText className="size-3" />
+                        {item.kind}
+                      </span>
+                      <span
+                        title={item.activation}
+                        className="inline-flex items-center gap-1 rounded bg-violet-500/10 px-2 py-0.5 text-xs text-violet-600 dark:text-violet-300"
+                      >
+                        <Clock className="size-3" />
+                        {item.state === "shadowed"
+                          ? "Shadowed"
+                          : item.state === "conditional"
+                            ? "On demand"
+                            : item.kind === "skill" || item.kind === "command"
+                              ? "Available"
+                              : "At launch"}
+                      </span>
+                      {item.scope === "Nested" && (
+                        <span className="text-xs text-muted-foreground">Subfolder</span>
+                      )}
+                      {item.external && (
+                        <span className="text-xs text-muted-foreground">Outside project</span>
+                      )}
+                    </div>
+                    <p
+                      className="mt-1 truncate font-mono text-xs text-muted-foreground"
+                      title={item.path}
+                    >
+                      {item.path.startsWith(report.root + "/")
+                        ? item.path.slice(report.root.length + 1)
+                        : item.path}
+                    </p>
+                  </div>
+                  <button
+                    aria-label={`Preview and edit ${item.path}`}
+                    title="Preview and edit"
+                    onClick={() => setDocumentItem(item)}
+                    className="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    type="button"
+                  >
+                    <Eye className="size-4" />
+                  </button>
+                </div>
+              ))}
+              {entries.length > 5 && (
+                <button
+                  type="button"
+                  className="w-full border-t py-3 text-sm font-medium text-primary hover:bg-muted"
+                  onClick={() =>
+                    setExpandedScopes((current) => ({
+                      ...current,
+                      [provider + scope]: !current[provider + scope],
+                    }))
+                  }
+                >
+                  {expandedScopes[provider + scope] ? "Show less" : `Show all ${entries.length}`}
+                </button>
+              )}
+            </div>
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
+function ContextStatusFilter({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const container = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const options = [
+    { value: "all", label: "All statuses" },
+    { value: "conditional", label: "On demand" },
+    { value: "other", label: "Not on demand" },
+  ];
+  useEffect(() => {
+    if (!isOpen) return;
+    const close = (event: PointerEvent) => {
+      if (!container.current?.contains(event.target as Node)) setIsOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [isOpen]);
+  return (
+    <div
+      ref={container}
+      className="relative shrink-0"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setIsOpen(false);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          setIsOpen(false);
+          trigger.current?.focus();
+        }
+        if (isOpen && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+          event.preventDefault();
+          const items = Array.from(
+            container.current?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? [],
+          );
+          const index = items.indexOf(document.activeElement as HTMLButtonElement);
+          const next =
+            event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? items.length - 1
+                : (index + (event.key === "ArrowUp" ? -1 : 1) + items.length) % items.length;
+          items[next]?.focus();
+        }
+      }}
+    >
+      <button
+        ref={trigger}
+        type="button"
+        aria-label="Filter by activation"
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex h-9 items-center gap-2 rounded-md border bg-card px-3 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <Clock className="size-3.5 text-muted-foreground" />
+        {options.find((option) => option.value === value)?.label}
+        <ChevronDown className="size-3.5 text-muted-foreground" />
+      </button>
+      {isOpen && (
+        <div
+          role="menu"
+          aria-label="Activation status"
+          className="absolute right-0 top-full z-20 mt-2 w-48 rounded-lg border bg-card p-1 shadow-lg"
+        >
+          {options.map((option) => (
+            <button
+              autoFocus={option.value === value}
+              key={option.value}
+              role="menuitemradio"
+              aria-checked={option.value === value}
+              type="button"
+              className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm outline-none hover:bg-muted focus:bg-muted ${option.value === value ? "bg-accent text-accent-foreground" : "text-foreground"}`}
+              onClick={() => {
+                onChange(option.value);
+                setIsOpen(false);
+                trigger.current?.focus();
+              }}
+            >
+              {option.label}
+              {option.value === value && <CheckCircle2 className="size-3.5" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContextEditor({
+  item,
+  root,
+  onClose,
+  onRefresh,
+}: {
+  item: ContextArtifact;
+  root: string;
+  onClose: () => void;
+  onRefresh: () => void;
+}) {
+  const [content, setContent] = useState("");
+  const [originalContent, setOriginalContent] = useState("");
+  const [revision, setRevision] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  useEffect(() => {
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKey, true);
+    return () => {
+      window.removeEventListener("keydown", handleKey, true);
+      previousFocus?.focus();
+    };
+  }, [onClose]);
+  useEffect(() => {
+    let cancelled = false;
+    invoke<{ content: string; revision: string }>("read_context_file", {
+      projectPath: root,
+      id: item.id,
+    })
+      .then((result) => {
+        if (!cancelled) {
+          setContent(result.content);
+          setOriginalContent(result.content);
+          setRevision(result.revision);
+        }
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(String(reason));
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [root, item.id]);
+  const mutate = async (remove: boolean) => {
+    setBusy(true);
+    setError("");
+    try {
+      await invoke(remove ? "delete_context_file" : "save_context_file", {
+        projectPath: root,
+        id: item.id,
+        expectedRevision: revision,
+        content,
+      });
+      onRefresh();
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-label="Context file editor"
+        className="flex h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border bg-card shadow-xl"
+      >
+        <header className="flex shrink-0 items-center gap-3 border-b p-4">
+          <FileText className="size-5 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <h2 className="font-semibold">{contextItemName(item)}</h2>
+            <p className="truncate text-xs text-muted-foreground" title={item.path}>
+              {item.path}
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="Close editor"
+            autoFocus
+            onClick={onClose}
+            className="rounded p-2 hover:bg-muted"
+          >
+            <X className="size-4" />
+          </button>
+        </header>
+        {error && (
+          <p role="alert" className="px-4 py-3 text-sm text-red-500">
+            {error}
+          </p>
+        )}
+        {editing ? (
+          <textarea
+            aria-label="File content"
+            className="min-h-0 flex-1 resize-none overflow-auto bg-background p-5 font-mono text-sm leading-6 outline-none"
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+          />
+        ) : (
+          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-5 text-sm leading-6">
+            {busy ? "Loading…" : content || "Empty file"}
+          </pre>
+        )}
+        <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t p-4">
+          <div className="flex items-center gap-2">
+            <button
+              disabled={busy || !revision}
+              type="button"
+              onClick={() => setConfirmDelete(true)}
+              className="inline-flex items-center gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-500 hover:bg-red-500/20 disabled:opacity-50"
+            >
+              <Trash2 className="size-4" />
+              Delete
+            </button>
+            {confirmDelete && (
+              <>
+                <span className="text-xs text-muted-foreground">
+                  Delete this file? A backup is kept beside it.
+                </span>
+                <button
+                  disabled={busy}
+                  type="button"
+                  onClick={() => void mutate(true)}
+                  className="rounded bg-red-600 px-3 py-2 text-sm text-white"
+                >
+                  Confirm delete
+                </button>
+                <button type="button" onClick={() => setConfirmDelete(false)} className="text-sm">
+                  Cancel
+                </button>
+              </>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm disabled:opacity-50"
+              onClick={() => {
+                void invoke("open_context_file", { projectPath: root, id: item.id }).catch(
+                  (reason) => setError(String(reason)),
+                );
+              }}
+            >
+              <ExternalLink className="size-4" />
+              Open in text editor
+            </button>
+            {editing && (
+              <button
+                type="button"
+                disabled={busy}
+                className="rounded-md border px-3 py-2 text-sm disabled:opacity-50"
+                onClick={() => {
+                  setContent(originalContent);
+                  setEditing(false);
+                }}
+              >
+                Discard changes
+              </button>
+            )}
+            <button
+              disabled={busy || !revision}
+              type="button"
+              onClick={() => (editing ? void mutate(false) : setEditing(true))}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-50"
+            >
+              <Pencil className="size-4" />
+              {editing ? "Save changes" : "Edit"}
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function contextItemName(item: ContextArtifact) {
+  const segments = item.path.split(/[\\/]/).filter(Boolean);
+  if (item.kind === "skill") return segments[segments.length - 2] ?? "Skill";
+  return segments[segments.length - 1] ?? item.path;
 }
 
 function WelcomePage({
@@ -866,7 +1742,7 @@ function ConfigurationDetails({
           savingId={savingId}
         />
       )}
-      {activeTab === "plugins" && <PluginSettings config={config} />}
+      {activeTab === "plugins" && <PluginSettings previews={report.previews} />}
       {activeTab === "projects" && <ProjectSettings config={config} />}
       {activeTab === "environment" && <EnvironmentSettings config={config} />}
       {activeTab === "system" && <SystemSettings config={config} />}
@@ -1401,9 +2277,13 @@ function FeatureSettings({
   );
 }
 
-function PluginSettings({ config }: { config: Record<string, unknown> }) {
-  const plugins = recordEntries(config.plugins);
-  const marketplaces = recordEntries(config.marketplaces);
+interface ProviderAddon {
+  name: string;
+  detail: string;
+}
+
+function PluginSettings({ previews }: { previews: ConfigurationFilePreview[] }) {
+  const { marketplaces, plugins } = useMemo(() => providerAddonsFromPreviews(previews), [previews]);
 
   return (
     <ConfigurationPanel tabId="plugins">
@@ -1413,24 +2293,129 @@ function PluginSettings({ config }: { config: Record<string, unknown> }) {
         </EmptyConfigurationState>
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
-          <ConfigCollection entries={plugins} label="Plugins" />
-          <ConfigCollection entries={marketplaces} label="Marketplaces" />
+          <AddonCollection entries={plugins} label="Plugins" />
+          <AddonCollection entries={marketplaces} label="Marketplaces" />
         </div>
       )}
     </ConfigurationPanel>
   );
 }
 
-function ConfigCollection({ entries, label }: { entries: [string, unknown][]; label: string }) {
+function providerAddonsFromPreviews(previews: ConfigurationFilePreview[]) {
+  const plugins = new Map<
+    string,
+    { configured: boolean; enabled?: boolean; installed: boolean; local: boolean }
+  >();
+  const marketplaces = new Map<string, "configured" | "registered">();
+
+  const recordPlugin = (
+    name: string,
+    source: "configured" | "installed" | "local",
+    enabled?: boolean,
+  ) => {
+    const plugin = plugins.get(name) ?? {
+      configured: false,
+      installed: false,
+      local: false,
+    };
+    plugin[source] = true;
+    if (enabled !== undefined) {
+      plugin.enabled = enabled;
+    }
+    plugins.set(name, plugin);
+  };
+
+  previews.forEach((preview) => {
+    if (!isRecord(preview.content)) {
+      return;
+    }
+
+    const isClaudePluginRegistry = preview.id === "claude-code-plugins-installed";
+    const isOpenCodePluginDirectory = preview.id === "opencode-global-plugins";
+    if (
+      preview.id.startsWith("gemini-cli-extension-") &&
+      typeof preview.content.name === "string"
+    ) {
+      recordPlugin(preview.content.name, "installed");
+    }
+    pluginNames(preview.content.plugins).forEach(({ enabled, name }) =>
+      recordPlugin(
+        name,
+        isClaudePluginRegistry ? "installed" : isOpenCodePluginDirectory ? "local" : "configured",
+        enabled,
+      ),
+    );
+    pluginNames(preview.content.plugin).forEach(({ enabled, name }) =>
+      recordPlugin(name, "configured", enabled),
+    );
+    recordEntries(preview.content.enabledPlugins).forEach(([name, enabled]) =>
+      recordPlugin(name, "configured", typeof enabled === "boolean" ? enabled : undefined),
+    );
+
+    const isClaudeMarketplaceRegistry = preview.id === "claude-code-plugin-marketplaces";
+    if (isClaudeMarketplaceRegistry) {
+      recordEntries(preview.content).forEach(([name]) => marketplaces.set(name, "registered"));
+    }
+    recordEntries(preview.content.marketplaces).forEach(([name]) =>
+      marketplaces.set(name, "configured"),
+    );
+    recordEntries(preview.content.extraKnownMarketplaces).forEach(([name]) =>
+      marketplaces.set(name, "configured"),
+    );
+  });
+
+  return {
+    plugins: [...plugins.entries()]
+      .map(([name, plugin]) => ({
+        name,
+        detail: plugin.installed
+          ? `Installed${plugin.enabled === undefined ? "" : plugin.enabled ? " · Enabled" : " · Disabled"}`
+          : plugin.local
+            ? "Local plugin"
+            : `Configured${plugin.enabled === undefined ? "" : plugin.enabled ? " · Enabled" : " · Disabled"}`,
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+    marketplaces: [...marketplaces.entries()]
+      .map(([name, source]) => ({
+        name,
+        detail: source === "registered" ? "Registered marketplace" : "Configured marketplace",
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+  };
+}
+
+function pluginNames(value: unknown): { enabled?: boolean; name: string }[] {
+  if (isRecord(value)) {
+    return Object.keys(value).map((name) => ({ name }));
+  }
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.map((plugin, index) => {
+    if (typeof plugin === "string") {
+      return plugin.startsWith("-") ? { name: plugin.slice(1), enabled: false } : { name: plugin };
+    }
+    if (isRecord(plugin)) {
+      const name = firstString(plugin.name, plugin.package);
+      if (name) {
+        return { name };
+      }
+    }
+    return { name: `Plugin ${index + 1}` };
+  });
+}
+
+function AddonCollection({ entries, label }: { entries: ProviderAddon[]; label: string }) {
   return (
     <article className="overflow-hidden rounded-lg border bg-card">
       <h2 className="border-b px-4 py-3 text-sm font-semibold">{label}</h2>
       {entries.length > 0 ? (
         <ul className="divide-y">
-          {entries.map(([name, value]) => (
-            <li className="px-4 py-3" key={name}>
-              <p className="break-all text-sm font-medium">{name}</p>
-              <p className="mt-1 text-xs text-muted-foreground">{configurationSummary(value)}</p>
+          {entries.map((entry) => (
+            <li className="px-4 py-3" key={entry.name}>
+              <p className="break-all text-sm font-medium">{entry.name}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{entry.detail}</p>
             </li>
           ))}
         </ul>

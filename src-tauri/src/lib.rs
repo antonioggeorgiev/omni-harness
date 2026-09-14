@@ -185,6 +185,31 @@ struct ConfigWatcher {
     watcher: Mutex<Option<RecommendedWatcher>>,
 }
 
+/// A deliberately small inventory of agent-facing context. Paths are gathered
+/// from a user-selected project plus documented harness homes; no source is
+/// executed and file contents are not returned to the renderer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectContextReport {
+    root: String,
+    workspace_root: String,
+    scanned_at: u64,
+    artifacts: Vec<ContextArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextArtifact {
+    id: String,
+    provider: String,
+    kind: String,
+    scope: String,
+    state: String,
+    activation: String,
+    path: String,
+    external: bool,
+}
+
 #[tauri::command]
 fn scan_harnesses() -> ScanResult {
     let mut families = vec![
@@ -192,13 +217,52 @@ fn scan_harnesses() -> ScanResult {
         scan_claude_family(),
         scan_cursor_family(),
         scan_opencode_family(),
+        scan_gemini_cli_family(),
     ];
-    families.extend(catalog_entries().iter().map(scan_catalog_entry));
+    families.extend(
+        catalog_entries()
+            .iter()
+            .filter(|entry| entry.id != "gemini-cli")
+            .map(scan_catalog_entry),
+    );
 
     ScanResult {
         families,
         scanned_at: unix_now(),
     }
+}
+
+/// Scans only an explicitly selected project folder and known, read-only
+/// provider locations. This command never evaluates instructions or skills.
+#[tauri::command]
+fn scan_project_context(project_path: String) -> Result<ProjectContextReport, String> {
+    let root = fs::canonicalize(&project_path)
+        .map_err(|error| format!("Could not open the selected folder: {error}"))?;
+    if !root.is_dir() {
+        return Err("Select a folder to import as a project.".into());
+    }
+
+    let workspace_root = find_workspace_root(&root).unwrap_or_else(|| root.clone());
+    let mut artifacts = Vec::new();
+    let mut seen = HashSet::new();
+
+    collect_codex_context(&root, &workspace_root, &mut artifacts, &mut seen);
+    collect_claude_context(&root, &workspace_root, &mut artifacts, &mut seen);
+    collect_gemini_context(&root, &workspace_root, &mut artifacts, &mut seen);
+
+    artifacts.sort_by(|left, right| {
+        left.provider
+            .cmp(&right.provider)
+            .then(left.scope.cmp(&right.scope))
+            .then(left.path.cmp(&right.path))
+    });
+
+    Ok(ProjectContextReport {
+        root: display_path(root),
+        workspace_root: display_path(workspace_root),
+        scanned_at: unix_now(),
+        artifacts,
+    })
 }
 
 #[tauri::command]
@@ -642,7 +706,7 @@ fn scan_claude_family() -> HarnessFamilySummary {
         .map(|home| {
             configuration_store(
                 "claude-desktop-chat",
-                "Claude Desktop configuration",
+                "Claude Desktop Chat configuration",
                 "JSON",
                 home.join("Library/Application Support/Claude/claude_desktop_config.json"),
                 &["Desktop chat"],
@@ -652,13 +716,13 @@ fn scan_claude_family() -> HarnessFamilySummary {
         .collect::<Vec<_>>();
     let desktop_surfaces = vec![application_surface(
         "claude-desktop-chat-app",
-        "Claude Desktop",
+        "Claude Desktop Chat",
         &["Claude.app"],
     )];
     let desktop_status = runtime_status(&desktop_store, &desktop_surfaces);
     let desktop_runtime = HarnessRuntimeSummary {
         id: "claude-desktop-chat".into(),
-        name: "Claude Desktop".into(),
+        name: "Claude Desktop Chat".into(),
         status: desktop_status,
         message: "Desktop chat connectors and MCP configuration are separate from Claude Code."
             .into(),
@@ -730,6 +794,12 @@ fn scan_opencode_family() -> HarnessFamilySummary {
                     root.join("opencode/opencode.jsonc"),
                     &["CLI"],
                 ),
+                configuration_directory_store(
+                    "opencode-global-plugins",
+                    "OpenCode local plugins",
+                    root.join("opencode/plugins"),
+                    &["CLI"],
+                ),
             ]
         })
         .unwrap_or_default();
@@ -744,6 +814,21 @@ fn scan_opencode_family() -> HarnessFamilySummary {
         surfaces,
     };
     family("opencode", "OpenCode", vec![runtime], status)
+}
+
+fn scan_gemini_cli_family() -> HarnessFamilySummary {
+    let stores = gemini_cli_stores();
+    let surfaces = vec![cli_surface("gemini-cli", "Gemini CLI", &["gemini"])];
+    let status = runtime_status(&stores, &surfaces);
+    let runtime = HarnessRuntimeSummary {
+        id: "gemini-cli-runtime".into(),
+        name: "Gemini CLI".into(),
+        status: status.clone(),
+        message: "User settings and installed extension manifests are checked locally.".into(),
+        config_stores: stores,
+        surfaces,
+    };
+    family("gemini-cli", "Gemini CLI", vec![runtime], status)
 }
 
 fn scan_catalog_entry(entry: &CatalogEntry) -> HarnessFamilySummary {
@@ -886,6 +971,23 @@ fn configuration_store(
     }
 }
 
+fn configuration_directory_store(
+    id: &str,
+    label: &str,
+    path: PathBuf,
+    shared_by: &[&str],
+) -> ConfigurationStore {
+    let exists = path.is_dir();
+    ConfigurationStore {
+        id: id.into(),
+        label: label.into(),
+        format: "Directory".into(),
+        path: display_path(path),
+        exists,
+        shared_by: shared_by.iter().map(|item| (*item).into()).collect(),
+    }
+}
+
 fn home_config_stores(id: &str, name: &str, paths: &[(&str, &str)]) -> Vec<ConfigurationStore> {
     let Some(home) = home_dir() else {
         return Vec::new();
@@ -985,13 +1087,29 @@ fn claude_code_stores() -> Vec<ConfigurationStore> {
         .or_else(|| home_dir().map(|home| home.join(".claude")));
     let mut stores = root
         .map(|root| {
-            vec![configuration_store(
-                "claude-code-settings",
-                "Claude Code settings",
-                "JSON",
-                root.join("settings.json"),
-                &["CLI", "IDE extension", "Desktop Code tab"],
-            )]
+            vec![
+                configuration_store(
+                    "claude-code-settings",
+                    "Claude Code settings",
+                    "JSON",
+                    root.join("settings.json"),
+                    &["CLI", "IDE extension", "Desktop Code tab"],
+                ),
+                configuration_store(
+                    "claude-code-plugins-installed",
+                    "Claude Code installed plugins",
+                    "JSON",
+                    root.join("plugins/installed_plugins.json"),
+                    &["CLI", "IDE extension", "Desktop Code tab"],
+                ),
+                configuration_store(
+                    "claude-code-plugin-marketplaces",
+                    "Claude Code plugin marketplaces",
+                    "JSON",
+                    root.join("plugins/known_marketplaces.json"),
+                    &["CLI", "IDE extension", "Desktop Code tab"],
+                ),
+            ]
         })
         .unwrap_or_default();
     if let Some(home) = home_dir() {
@@ -1003,6 +1121,50 @@ fn claude_code_stores() -> Vec<ConfigurationStore> {
             &["CLI", "IDE extension", "Desktop Code tab"],
         ));
     }
+    stores
+}
+
+fn gemini_cli_stores() -> Vec<ConfigurationStore> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+
+    let extension_root = home.join(".gemini/extensions");
+    let mut stores = vec![configuration_store(
+        "gemini-cli-settings",
+        "Gemini CLI user settings",
+        "JSON",
+        home.join(".gemini/settings.json"),
+        &["CLI"],
+    )];
+
+    let Ok(entries) = fs::read_dir(extension_root) else {
+        return stores;
+    };
+
+    let mut manifests = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path().join("gemini-extension.json");
+            path.is_file().then_some((entry.file_name(), path))
+        })
+        .collect::<Vec<_>>();
+    manifests.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+    stores.extend(
+        manifests
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, path))| {
+                configuration_store(
+                    &format!("gemini-cli-extension-{index}"),
+                    &format!("Gemini CLI extension: {}", name.to_string_lossy()),
+                    "JSON",
+                    path,
+                    &["CLI"],
+                )
+            }),
+    );
     stores
 }
 
@@ -1744,6 +1906,27 @@ fn configuration_file_preview(store: &ConfigurationStore) -> ConfigurationFilePr
         return preview;
     }
 
+    if store.format == "Directory" {
+        let entries = match fs::read_dir(&store.path) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| !name.starts_with('.'))
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                preview.diagnostic = Some(format!("Could not read this directory: {error}"));
+                return preview;
+            }
+        };
+        let mut entries = entries;
+        entries.sort();
+        entries.truncate(200);
+        let content = entries.join("\n");
+        preview.revision = Some(configuration_revision(&content));
+        preview.content = Some(serde_json::json!({ "plugins": entries }));
+        return preview;
+    }
+
     let content = match fs::read_to_string(&store.path) {
         Ok(content) => content,
         Err(error) => {
@@ -1820,6 +2003,661 @@ fn is_sensitive_key(key: &str) -> bool {
     ]
     .iter()
     .any(|needle| normalized.contains(needle))
+}
+
+#[derive(Serialize)]
+struct ContextDocument {
+    content: String,
+    revision: String,
+}
+
+fn resolve_context_file(project_path: String, id: String) -> Result<PathBuf, String> {
+    scan_project_context(project_path)?
+        .artifacts
+        .into_iter()
+        .find(|item| item.id == id)
+        .map(|item| PathBuf::from(item.path))
+        .ok_or_else(|| {
+            "This context file is no longer in the project inventory. Rescan first.".into()
+        })
+}
+
+#[tauri::command]
+fn read_context_file(project_path: String, id: String) -> Result<ContextDocument, String> {
+    let path = resolve_context_file(project_path, id)?;
+    if fs::metadata(&path).map_err(|e| e.to_string())?.len() > 1_048_576 {
+        return Err("This file exceeds the 1 MB editor limit.".into());
+    }
+    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    Ok(ContextDocument {
+        revision: configuration_revision(&content),
+        content,
+    })
+}
+
+#[tauri::command]
+fn open_context_file(project_path: String, id: String) -> Result<(), String> {
+    let path = resolve_context_file(project_path, id)?;
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(&path).status();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("notepad.exe")
+        .arg(&path)
+        .spawn()
+        .map(|_| ());
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result = std::process::Command::new("xdg-open").arg(&path).status();
+    #[cfg(not(target_os = "windows"))]
+    {
+        let status = result.map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err("Could not open the default text editor.".into());
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    result.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_context_file(
+    project_path: String,
+    id: String,
+    content: String,
+    expected_revision: String,
+) -> Result<(), String> {
+    if content.len() > 1_048_576 {
+        return Err("This file exceeds the 1 MB editor limit.".into());
+    }
+    let path = resolve_context_file(project_path, id)?;
+    let current = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    if configuration_revision(&current) != expected_revision {
+        return Err("The file changed on disk. Close and reopen it before saving.".into());
+    }
+    write_configuration_atomically(&path, &content)
+}
+
+#[tauri::command]
+fn delete_context_file(
+    project_path: String,
+    id: String,
+    expected_revision: String,
+) -> Result<(), String> {
+    let path = resolve_context_file(project_path, id)?;
+    let current = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    if configuration_revision(&current) != expected_revision {
+        return Err("The file changed on disk. Close and reopen it before deleting.".into());
+    }
+    let backup = path.with_file_name(format!(
+        "{}.omniharness-deleted-{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        unix_now()
+    ));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup)
+        .and_then(|mut file| file.write_all(current.as_bytes()))
+        .map_err(|e| e.to_string())?;
+    fs::remove_file(path).map_err(|e| e.to_string())
+}
+
+fn collect_codex_context(
+    project_root: &Path,
+    workspace_root: &Path,
+    artifacts: &mut Vec<ContextArtifact>,
+    seen: &mut HashSet<String>,
+) {
+    let codex_home = codex_config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".codex"));
+    add_instruction_pair(
+        artifacts,
+        seen,
+        "Codex",
+        "User",
+        "active",
+        "Loaded before project instructions",
+        codex_home.join("AGENTS.override.md"),
+        codex_home.join("AGENTS.md"),
+        project_root,
+    );
+
+    if let Some(home) = home_dir() {
+        add_skill_directory(
+            artifacts,
+            seen,
+            "Codex",
+            "User",
+            "active",
+            "Available in every project",
+            &home.join(".agents/skills"),
+            project_root,
+        );
+    }
+    // Older local Codex installations and some managed setups retain this
+    // directory. Showing it separately makes migrations visible.
+    add_skill_directory(
+        artifacts,
+        seen,
+        "Codex",
+        "User",
+        "active",
+        "Available in every project",
+        &codex_home.join("skills"),
+        project_root,
+    );
+    add_skill_directory(
+        artifacts,
+        seen,
+        "Codex",
+        "System",
+        "active",
+        "Machine-managed skill",
+        Path::new("/etc/codex/skills"),
+        project_root,
+    );
+
+    let active_directories = context_path_directories(workspace_root, project_root);
+    let project_directories = project_directories(project_root);
+    for directory in project_directories {
+        let active = active_directories.contains(&directory);
+        let scope = if directory == workspace_root {
+            "Project"
+        } else {
+            "Nested"
+        };
+        let state = if active { "active" } else { "conditional" };
+        let activation = if active {
+            "Loaded for the selected working directory"
+        } else {
+            "Discovered when work reaches this directory"
+        };
+        add_instruction_pair(
+            artifacts,
+            seen,
+            "Codex",
+            scope,
+            state,
+            activation,
+            directory.join("AGENTS.override.md"),
+            directory.join("AGENTS.md"),
+            project_root,
+        );
+        add_skill_directory(
+            artifacts,
+            seen,
+            "Codex",
+            scope,
+            state,
+            activation,
+            &directory.join(".agents/skills"),
+            project_root,
+        );
+    }
+}
+
+fn collect_claude_context(
+    project_root: &Path,
+    workspace_root: &Path,
+    artifacts: &mut Vec<ContextArtifact>,
+    seen: &mut HashSet<String>,
+) {
+    #[cfg(target_os = "macos")]
+    let managed_path = PathBuf::from("/Library/Application Support/ClaudeCode/CLAUDE.md");
+    #[cfg(not(target_os = "macos"))]
+    let managed_path = PathBuf::from("/etc/claude-code/CLAUDE.md");
+    add_context_artifact(
+        artifacts,
+        seen,
+        "Claude Code",
+        "instruction",
+        "Organization",
+        "active",
+        "Managed policy loaded before user and project context",
+        managed_path,
+        project_root,
+    );
+
+    if let Some(home) = home_dir() {
+        add_context_artifact(
+            artifacts,
+            seen,
+            "Claude Code",
+            "instruction",
+            "User",
+            "active",
+            "Loaded for every local Claude Code project",
+            home.join(".claude/CLAUDE.md"),
+            project_root,
+        );
+        add_skill_directory(
+            artifacts,
+            seen,
+            "Claude Code",
+            "User",
+            "active",
+            "Available in every local project",
+            &home.join(".claude/skills"),
+            project_root,
+        );
+    }
+
+    let active_directories = context_path_directories(workspace_root, project_root);
+    for directory in project_directories(project_root) {
+        let active = active_directories.contains(&directory);
+        let scope = if directory == workspace_root || directory == project_root {
+            "Project"
+        } else {
+            "Nested"
+        };
+        let state = if active { "active" } else { "conditional" };
+        let activation = if active {
+            "Loaded for the selected working directory"
+        } else {
+            "Loaded when Claude works in this directory"
+        };
+        add_context_artifact(
+            artifacts,
+            seen,
+            "Claude Code",
+            "instruction",
+            scope,
+            state,
+            activation,
+            directory.join("CLAUDE.md"),
+            project_root,
+        );
+        add_context_artifact(
+            artifacts,
+            seen,
+            "Claude Code",
+            "instruction",
+            if directory == workspace_root {
+                "Project"
+            } else {
+                "Local"
+            },
+            state,
+            activation,
+            directory.join("CLAUDE.local.md"),
+            project_root,
+        );
+        add_context_artifact(
+            artifacts,
+            seen,
+            "Claude Code",
+            "instruction",
+            scope,
+            state,
+            activation,
+            directory.join(".claude/CLAUDE.md"),
+            project_root,
+        );
+        add_skill_directory(
+            artifacts,
+            seen,
+            "Claude Code",
+            scope,
+            state,
+            activation,
+            &directory.join(".claude/skills"),
+            project_root,
+        );
+        add_markdown_directory(
+            artifacts,
+            seen,
+            "Claude Code",
+            "rule",
+            scope,
+            state,
+            "Always loaded or path-matched by Claude Code",
+            &directory.join(".claude/rules"),
+            project_root,
+        );
+        add_markdown_directory(
+            artifacts,
+            seen,
+            "Claude Code",
+            "command",
+            scope,
+            state,
+            "Available as a legacy Claude command",
+            &directory.join(".claude/commands"),
+            project_root,
+        );
+    }
+}
+
+fn collect_gemini_context(
+    project_root: &Path,
+    workspace_root: &Path,
+    artifacts: &mut Vec<ContextArtifact>,
+    seen: &mut HashSet<String>,
+) {
+    let mut names = vec!["GEMINI.md".to_string()];
+    if let Some(home) = home_dir() {
+        names.extend(gemini_context_filenames(
+            &home.join(".gemini/settings.json"),
+        ));
+        for name in &names {
+            add_context_artifact(
+                artifacts,
+                seen,
+                "Gemini CLI",
+                "instruction",
+                "User",
+                "active",
+                "Loaded before workspace context",
+                home.join(".gemini").join(name),
+                project_root,
+            );
+        }
+        add_skill_directory(
+            artifacts,
+            seen,
+            "Gemini CLI",
+            "User",
+            "active",
+            "Available in every project",
+            &home.join(".gemini/skills"),
+            project_root,
+        );
+        add_skill_directory(
+            artifacts,
+            seen,
+            "Gemini CLI",
+            "User",
+            "active",
+            "Available through Gemini's .agents alias",
+            &home.join(".agents/skills"),
+            project_root,
+        );
+    }
+
+    let active_directories = context_path_directories(workspace_root, project_root);
+    for directory in project_directories(project_root) {
+        let mut directory_names = names.clone();
+        directory_names.extend(gemini_context_filenames(
+            &directory.join(".gemini/settings.json"),
+        ));
+        directory_names.sort();
+        directory_names.dedup();
+        let active = active_directories.contains(&directory);
+        let scope = if directory == workspace_root || directory == project_root {
+            "Project"
+        } else {
+            "Nested"
+        };
+        let state = if active { "active" } else { "conditional" };
+        let activation = if active {
+            "Loaded for the selected working directory"
+        } else {
+            "Discovered when Gemini works in this directory"
+        };
+        for name in &directory_names {
+            add_context_artifact(
+                artifacts,
+                seen,
+                "Gemini CLI",
+                "instruction",
+                scope,
+                state,
+                activation,
+                directory.join(name),
+                project_root,
+            );
+        }
+        add_skill_directory(
+            artifacts,
+            seen,
+            "Gemini CLI",
+            scope,
+            state,
+            activation,
+            &directory.join(".gemini/skills"),
+            project_root,
+        );
+        add_skill_directory(
+            artifacts,
+            seen,
+            "Gemini CLI",
+            scope,
+            state,
+            "Available through Gemini's .agents alias",
+            &directory.join(".agents/skills"),
+            project_root,
+        );
+    }
+}
+
+fn gemini_context_filenames(settings_path: &Path) -> Vec<String> {
+    let Ok(content) = fs::read_to_string(settings_path) else {
+        return Vec::new();
+    };
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Vec::new();
+    };
+    let Some(file_name) = settings
+        .get("context")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|context| context.get("fileName"))
+    else {
+        return Vec::new();
+    };
+    match file_name {
+        serde_json::Value::String(name) => vec![name.clone()],
+        serde_json::Value::Array(names) => names
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_instruction_pair(
+    artifacts: &mut Vec<ContextArtifact>,
+    seen: &mut HashSet<String>,
+    provider: &str,
+    scope: &str,
+    requested_state: &str,
+    activation: &str,
+    override_path: PathBuf,
+    standard_path: PathBuf,
+    project_root: &Path,
+) {
+    let override_exists = override_path.is_file();
+    let standard_state = if override_exists {
+        "shadowed"
+    } else {
+        requested_state
+    };
+    add_context_artifact(
+        artifacts,
+        seen,
+        provider,
+        "instruction",
+        scope,
+        requested_state,
+        activation,
+        override_path,
+        project_root,
+    );
+    add_context_artifact(
+        artifacts,
+        seen,
+        provider,
+        "instruction",
+        scope,
+        standard_state,
+        if override_exists {
+            "Ignored because an override exists beside it"
+        } else {
+            activation
+        },
+        standard_path,
+        project_root,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_skill_directory(
+    artifacts: &mut Vec<ContextArtifact>,
+    seen: &mut HashSet<String>,
+    provider: &str,
+    scope: &str,
+    state: &str,
+    activation: &str,
+    directory: &Path,
+    project_root: &Path,
+) {
+    for skill_directory in project_directories(directory) {
+        add_context_artifact(
+            artifacts,
+            seen,
+            provider,
+            "skill",
+            scope,
+            state,
+            activation,
+            skill_directory.join("SKILL.md"),
+            project_root,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_markdown_directory(
+    artifacts: &mut Vec<ContextArtifact>,
+    seen: &mut HashSet<String>,
+    provider: &str,
+    kind: &str,
+    scope: &str,
+    state: &str,
+    activation: &str,
+    directory: &Path,
+    project_root: &Path,
+) {
+    for child_directory in project_directories(directory) {
+        let Ok(entries) = fs::read_dir(child_directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().is_some_and(|extension| extension == "md") {
+                add_context_artifact(
+                    artifacts,
+                    seen,
+                    provider,
+                    kind,
+                    scope,
+                    state,
+                    activation,
+                    path,
+                    project_root,
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_context_artifact(
+    artifacts: &mut Vec<ContextArtifact>,
+    seen: &mut HashSet<String>,
+    provider: &str,
+    kind: &str,
+    scope: &str,
+    state: &str,
+    activation: &str,
+    path: PathBuf,
+    project_root: &Path,
+) {
+    if !path.is_file() {
+        return;
+    }
+    let canonical_path = fs::canonicalize(&path).unwrap_or(path);
+    let path_string = display_path(canonical_path.clone());
+    let key = format!("{provider}:{kind}:{path_string}");
+    if !seen.insert(key.clone()) {
+        return;
+    }
+    artifacts.push(ContextArtifact {
+        id: context_artifact_id(&key),
+        provider: provider.into(),
+        kind: kind.into(),
+        scope: scope.into(),
+        state: state.into(),
+        activation: activation.into(),
+        path: path_string,
+        external: !canonical_path.starts_with(project_root),
+    });
+}
+
+fn context_artifact_id(source: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    format!("context-{:x}", hasher.finish())
+}
+
+fn find_workspace_root(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+fn context_path_directories(workspace_root: &Path, project_root: &Path) -> HashSet<PathBuf> {
+    let mut directories = HashSet::new();
+    if let Ok(relative) = project_root.strip_prefix(workspace_root) {
+        let mut current = workspace_root.to_path_buf();
+        directories.insert(current.clone());
+        for component in relative.components() {
+            current.push(component.as_os_str());
+            directories.insert(current.clone());
+        }
+    } else {
+        directories.insert(project_root.to_path_buf());
+    }
+    directories
+}
+
+fn project_directories(root: &Path) -> Vec<PathBuf> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    const MAX_DEPTH: usize = 8;
+    const MAX_DIRECTORIES: usize = 1_200;
+    let mut directories = Vec::new();
+    let mut pending = vec![(root.to_path_buf(), 0_usize)];
+    while let Some((directory, depth)) = pending.pop() {
+        if directories.len() >= MAX_DIRECTORIES {
+            break;
+        }
+        directories.push(directory.clone());
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if matches!(
+                name.as_ref(),
+                ".git" | "node_modules" | "target" | "dist" | "build" | ".next"
+            ) {
+                continue;
+            }
+            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                pending.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    directories
 }
 
 fn codex_config_path() -> PathBuf {
@@ -1932,9 +2770,15 @@ fn unix_now() -> u64 {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(ConfigWatcher::default())
         .invoke_handler(tauri::generate_handler![
             scan_harnesses,
+            scan_project_context,
+            read_context_file,
+            open_context_file,
+            save_context_file,
+            delete_context_file,
             inspect_harness,
             inspect_configuration,
             update_codex_general_setting,
@@ -2148,6 +2992,92 @@ command = "example-mcp"
             fs::read_to_string(directory.join("config.toml.omniharness.bak")).expect("backup file"),
             "model = \"before\"\n"
         );
+
+        fs::remove_dir_all(directory).expect("temporary directory is removed");
+    }
+
+    #[test]
+    fn previews_plugin_directories_as_entry_names_only() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is available")
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("omni-harness-plugins-test-{nonce}"));
+        fs::create_dir_all(directory.join("local-package"))
+            .expect("plugin package directory is created");
+        fs::write(directory.join("reviewer.ts"), "export {};")
+            .expect("plugin source fixture is written");
+        fs::write(directory.join(".ignored"), "hidden").expect("hidden fixture is written");
+
+        let preview = configuration_file_preview(&configuration_directory_store(
+            "plugins",
+            "Plugin directory fixture",
+            directory.clone(),
+            &[],
+        ));
+        let content = preview.content.expect("directory preview content");
+        let plugins = content["plugins"]
+            .as_array()
+            .expect("plugin entries are an array");
+
+        assert_eq!(plugins, &["local-package", "reviewer.ts"]);
+        assert!(preview.revision.is_some());
+        fs::remove_dir_all(directory).expect("temporary directory is removed");
+    }
+
+    #[test]
+    fn project_context_marks_nested_guidance_as_conditional() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is available")
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("omni-harness-context-test-{nonce}"));
+        fs::create_dir_all(directory.join(".git")).expect("git fixture is created");
+        fs::write(directory.join("AGENTS.md"), "# Root instructions")
+            .expect("root instructions are written");
+        fs::create_dir_all(directory.join(".agents/skills/review"))
+            .expect("Codex skill fixture is created");
+        fs::write(
+            directory.join(".agents/skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review code\n---\n",
+        )
+        .expect("skill is written");
+        fs::create_dir_all(directory.join("packages/web")).expect("nested fixture is created");
+        fs::write(
+            directory.join("packages/web/AGENTS.md"),
+            "# Nested instructions",
+        )
+        .expect("nested instructions are written");
+        fs::create_dir_all(directory.join(".claude/rules"))
+            .expect("Claude rules fixture is created");
+        fs::write(directory.join(".claude/rules/testing.md"), "# Test rules")
+            .expect("Claude rule is written");
+
+        let report = scan_project_context(display_path(directory.clone()))
+            .expect("project context is scanned");
+
+        assert!(report.artifacts.iter().any(|artifact| {
+            artifact.provider == "Codex"
+                && artifact.kind == "instruction"
+                && artifact.state == "active"
+                && artifact.path.ends_with("AGENTS.md")
+        }));
+        assert!(report.artifacts.iter().any(|artifact| {
+            artifact.provider == "Codex"
+                && artifact.kind == "skill"
+                && artifact.state == "active"
+                && artifact.path.ends_with("review/SKILL.md")
+        }));
+        assert!(report.artifacts.iter().any(|artifact| {
+            artifact.provider == "Codex"
+                && artifact.state == "conditional"
+                && artifact.path.ends_with("packages/web/AGENTS.md")
+        }));
+        assert!(report.artifacts.iter().any(|artifact| {
+            artifact.provider == "Claude Code"
+                && artifact.kind == "rule"
+                && artifact.path.ends_with(".claude/rules/testing.md")
+        }));
 
         fs::remove_dir_all(directory).expect("temporary directory is removed");
     }

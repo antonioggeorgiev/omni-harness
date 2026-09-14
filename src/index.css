@@ -90,3 +90,40 @@ button:disabled,
 [role="button"][aria-disabled="true"] {
   cursor: not-allowed;
 }
+
+/* Navigation levels: section, provider, then indented destination. */
+.sidebar-section-heading {
+  min-height: 32px;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.sidebar-section-heading > svg {
+  color: var(--muted-foreground);
+}
+
+.sidebar-count {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: normal;
+}
+
+.sidebar-child[aria-current="page"],
+.sidebar-project[aria-current="page"] {
+  box-shadow: inset 2px 0 0 var(--accent-foreground);
+  font-weight: 600;
+}
+
+.sidebar button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}

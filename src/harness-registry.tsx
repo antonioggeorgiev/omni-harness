@@ -49,7 +49,7 @@ export const harnessRegistry: Record<string, HarnessPresentation> = {
     icon: brandIcon(siAnthropic),
     runtimes: {
       "claude-code": { label: "Claude Code" },
-      "claude-desktop-chat": { label: "Claude Desktop" },
+      "claude-desktop-chat": { label: "Claude Desktop Chat" },
     },
   },
   cursor: catalog("cursor", "Cursor", brandIcon(siCursor), "Cursor Agent"),
