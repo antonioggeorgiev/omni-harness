@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   AppWindow,
@@ -75,11 +75,96 @@ interface ScanResult {
 }
 
 interface ConfigurationFilePreview {
+  id: string;
   path: string;
   format: string;
   exists: boolean;
+  revision?: string;
   content?: unknown;
   diagnostic?: string;
+}
+
+interface McpServerSummary {
+  id: string;
+  sourceId: string;
+  name: string;
+  transport: "HTTP" | "stdio";
+  endpoint: string;
+  enabled: boolean;
+  enabledPath?: string[];
+  usesDisabledFlag: boolean;
+}
+
+type ConfigurationTabId =
+  | "raw-config"
+  | "mcp-servers"
+  | "general"
+  | "features"
+  | "plugins"
+  | "projects"
+  | "environment"
+  | "system";
+
+const configurationTabs: { id: ConfigurationTabId; label: string }[] = [
+  { id: "raw-config", label: "Raw config" },
+  { id: "mcp-servers", label: "MCP servers" },
+  { id: "general", label: "General" },
+  { id: "features", label: "Features" },
+  { id: "plugins", label: "Plugins" },
+  { id: "projects", label: "Projects" },
+  { id: "environment", label: "Environment" },
+  { id: "system", label: "System" },
+];
+
+const lastOpenedConfigurationKey = "last-opened-configuration-id";
+const configurationTabsByTargetKey = "configuration-tabs-by-target";
+
+function storedLastOpenedConfiguration() {
+  return localStorage.getItem(lastOpenedConfigurationKey) ?? undefined;
+}
+
+function storedConfigurationTabsByTarget(): Partial<Record<string, ConfigurationTabId>> {
+  try {
+    const stored = JSON.parse(localStorage.getItem(configurationTabsByTargetKey) ?? "{}");
+    if (typeof stored !== "object" || stored === null || Array.isArray(stored)) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(stored).filter(
+        (entry): entry is [string, ConfigurationTabId] =>
+          typeof entry[1] === "string" && configurationTabs.some((tab) => tab.id === entry[1]),
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function storedConfigurationTab(targetId?: string): ConfigurationTabId {
+  if (!targetId) {
+    return "raw-config";
+  }
+
+  return storedConfigurationTabsByTarget()[targetId] ?? "raw-config";
+}
+
+function storeConfigurationTab(targetId: string, tab: ConfigurationTabId) {
+  const tabsByTarget = storedConfigurationTabsByTarget();
+  tabsByTarget[targetId] = tab;
+  localStorage.setItem(configurationTabsByTargetKey, JSON.stringify(tabsByTarget));
+}
+
+function removeStoredConfiguration(targetId: string) {
+  if (storedLastOpenedConfiguration() === targetId) {
+    localStorage.removeItem(lastOpenedConfigurationKey);
+  }
+
+  const tabsByTarget = storedConfigurationTabsByTarget();
+  if (targetId in tabsByTarget) {
+    delete tabsByTarget[targetId];
+    localStorage.setItem(configurationTabsByTargetKey, JSON.stringify(tabsByTarget));
+  }
 }
 
 interface ConfigurationReport {
@@ -99,7 +184,6 @@ interface ConfigurationTarget {
   runtimeId: string;
   familyName: string;
   name: string;
-  description: string;
   status: HarnessStatus;
 }
 
@@ -130,10 +214,14 @@ const statusPresentation: Record<
 };
 
 function App() {
-  const [screen, setScreen] = useState<Screen>("home");
+  const [screen, setScreen] = useState<Screen>(() =>
+    storedLastOpenedConfiguration() ? "configuration" : "home",
+  );
   const [scanResult, setScanResult] = useState<ScanResult>();
   const [scanError, setScanError] = useState<string>();
-  const [selectedConfiguration, setSelectedConfiguration] = useState<string>();
+  const [selectedConfiguration, setSelectedConfiguration] = useState<string | undefined>(
+    storedLastOpenedConfiguration,
+  );
   const [managedHarnessIds, setManagedHarnessIds] = useState<string[]>(() => {
     try {
       const storedHarnesses =
@@ -194,10 +282,12 @@ function App() {
       localStorage.setItem("managed-harness-ids", JSON.stringify(next));
       return next;
     });
+    removeStoredConfiguration(target.id);
     setSelectedConfiguration((current) => (current === target.id ? undefined : current));
   }, []);
 
   const openConfiguration = useCallback((target: ConfigurationTarget) => {
+    localStorage.setItem(lastOpenedConfigurationKey, target.id);
     setSelectedConfiguration(target.id);
     setScreen("configuration");
   }, []);
@@ -487,6 +577,11 @@ function ConfigurationPage({
   const [report, setReport] = useState<ConfigurationReport>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const [writeError, setWriteError] = useState<string>();
+  const [savingId, setSavingId] = useState<string>();
+  const [activeTab, setActiveTab] = useState<ConfigurationTabId>(() =>
+    storedConfigurationTab(target?.id),
+  );
 
   useEffect(() => {
     if (!target) {
@@ -518,6 +613,85 @@ function ConfigurationPage({
     void inspect();
   }, [target]);
 
+  useEffect(() => {
+    setActiveTab(storedConfigurationTab(target?.id));
+    setWriteError(undefined);
+  }, [target?.id]);
+
+  const selectTab = useCallback(
+    (tab: ConfigurationTabId) => {
+      if (target) {
+        storeConfigurationTab(target.id, tab);
+      }
+      setActiveTab(tab);
+    },
+    [target],
+  );
+
+  const saveCodexChange = useCallback(
+    async (
+      id: string,
+      command: "update_codex_general_setting" | "update_codex_feature" | "update_codex_mcp_enabled",
+      payload: Record<string, string | boolean>,
+    ) => {
+      const revision = configurationRevision(report);
+      if (!revision) {
+        setWriteError("This configuration has no revision. Reload it before making changes.");
+        return false;
+      }
+
+      setSavingId(id);
+      setWriteError(undefined);
+      try {
+        setReport(
+          await invoke<ConfigurationReport>(command, {
+            ...payload,
+            expectedRevision: revision,
+          }),
+        );
+        return true;
+      } catch (reason) {
+        setWriteError(reason instanceof Error ? reason.message : String(reason));
+        return false;
+      } finally {
+        setSavingId(undefined);
+      }
+    },
+    [report],
+  );
+
+  const saveStructuredChange = useCallback(
+    async (id: string, storeId: string, path: string[], value: string | boolean | number) => {
+      const preview = report?.previews.find((item) => item.id === storeId);
+      if (!preview?.revision) {
+        setWriteError("This configuration has no revision. Reload it before making changes.");
+        return false;
+      }
+
+      setSavingId(id);
+      setWriteError(undefined);
+      try {
+        setReport(
+          await invoke<ConfigurationReport>("update_configuration_value", {
+            familyId: target?.familyId,
+            runtimeId: target?.runtimeId,
+            storeId,
+            path,
+            settingValue: value,
+            expectedRevision: preview.revision,
+          }),
+        );
+        return true;
+      } catch (reason) {
+        setWriteError(reason instanceof Error ? reason.message : String(reason));
+        return false;
+      } finally {
+        setSavingId(undefined);
+      }
+    },
+    [report, target?.familyId, target?.runtimeId],
+  );
+
   if (!target) {
     return (
       <div className="mx-auto max-w-2xl px-8 py-12 sm:px-12">
@@ -533,15 +707,20 @@ function ConfigurationPage({
 
   return (
     <div className="mx-auto max-w-4xl px-8 py-8 sm:px-12">
-      <header className="flex flex-wrap items-start justify-between gap-4 border-b pb-7">
+      <header className="pb-7">
         <div>
-          <p className="text-sm text-muted-foreground">{target.familyName}</p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-[-0.035em]">{target.name}</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-            {target.description}
-          </p>
+          <h1 className="text-2xl font-semibold tracking-[-0.035em]">{target.name}</h1>
+          {report && (
+            <div
+              className="mt-3 flex flex-wrap gap-2"
+              aria-label={`${target.name} supported surfaces`}
+            >
+              {report.surfaces.map((surface) => (
+                <SurfaceChip key={surface.id} surface={surface} />
+              ))}
+            </div>
+          )}
         </div>
-        <StatusBadge presentation={statusPresentation[target.status]} />
       </header>
 
       {loading && <ConfigurationSkeleton />}
@@ -556,59 +735,883 @@ function ConfigurationPage({
         </div>
       )}
 
-      {report && <ConfigurationPreview report={report} />}
+      {writeError && (
+        <div className="mt-6 flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-800 dark:text-amber-200">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <div>
+            <p className="font-medium">The configuration could not be saved</p>
+            <p className="mt-1 opacity-80">{writeError}</p>
+          </div>
+        </div>
+      )}
+
+      {report && (
+        <ConfigurationDetails
+          activeTab={activeTab}
+          canEditCodex={report.id === "codex:codex-local"}
+          onTabChange={selectTab}
+          onUpdateFeature={(key, enabled) =>
+            saveCodexChange(`feature:${key}`, "update_codex_feature", { key, enabled })
+          }
+          onUpdateGeneral={(key, value) =>
+            saveCodexChange(`general:${key}`, "update_codex_general_setting", { key, value })
+          }
+          onUpdateMcp={(server, enabled) =>
+            saveCodexChange(`mcp:${server}`, "update_codex_mcp_enabled", { server, enabled })
+          }
+          onUpdateStructured={saveStructuredChange}
+          report={report}
+          savingId={savingId}
+        />
+      )}
     </div>
   );
 }
 
-function ConfigurationPreview({ report }: { report: ConfigurationReport }) {
+function ConfigurationDetails({
+  activeTab,
+  canEditCodex,
+  onTabChange,
+  onUpdateFeature,
+  onUpdateGeneral,
+  onUpdateMcp,
+  onUpdateStructured,
+  report,
+  savingId,
+}: {
+  activeTab: ConfigurationTabId;
+  canEditCodex: boolean;
+  onTabChange: (tab: ConfigurationTabId) => void;
+  onUpdateFeature: (key: string, enabled: boolean) => Promise<boolean>;
+  onUpdateGeneral: (key: string, value: string) => Promise<boolean>;
+  onUpdateMcp: (server: string, enabled: boolean) => Promise<boolean>;
+  onUpdateStructured: (
+    id: string,
+    storeId: string,
+    path: string[],
+    value: string | boolean | number,
+  ) => Promise<boolean>;
+  report: ConfigurationReport;
+  savingId?: string;
+}) {
+  const mcpServers = useMemo(() => mcpServersFromPreviews(report.previews), [report.previews]);
+  const source = useMemo(() => configurationSourceFromPreviews(report.previews), [report.previews]);
+  const config = source?.content ?? {};
+  const canEditStructured = Boolean(source && source.format !== "TOML");
+  const canEdit = canEditCodex || canEditStructured;
+
+  const updateGeneral = (path: string[], value: string | boolean | number) =>
+    canEditCodex
+      ? onUpdateGeneral(path[0], String(value))
+      : source
+        ? onUpdateStructured(`general:${path.join(".")}`, source.id, path, value)
+        : Promise.resolve(false);
+  const updateFeature = (key: string, enabled: boolean) =>
+    canEditCodex
+      ? onUpdateFeature(key, enabled)
+      : source
+        ? onUpdateStructured(`feature:${key}`, source.id, ["features", key], enabled)
+        : Promise.resolve(false);
+  const updateMcp = (server: McpServerSummary, enabled: boolean) =>
+    canEditCodex
+      ? onUpdateMcp(server.name, enabled)
+      : server.enabledPath
+        ? onUpdateStructured(
+            `mcp:${server.sourceId}:${server.name}`,
+            server.sourceId,
+            server.enabledPath,
+            server.usesDisabledFlag ? !enabled : enabled,
+          )
+        : Promise.resolve(false);
+
   return (
-    <div className="space-y-7 py-7">
-      <section aria-labelledby="shared-by-heading">
-        <h2 className="text-sm font-semibold" id="shared-by-heading">
-          Shared by
-        </h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          These entry points use the same configuration entity.
-        </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {report.surfaces.map((surface) => (
-            <SurfaceChip key={surface.id} surface={surface} />
+    <div className="py-7">
+      <div className="overflow-x-auto border-b">
+        <div aria-label="Configuration details" className="flex min-w-max gap-5" role="tablist">
+          {configurationTabs.map((tab) => (
+            <ConfigurationTab
+              active={activeTab === tab.id}
+              id={tab.id}
+              key={tab.id}
+              label={tab.label}
+              onSelect={onTabChange}
+            />
           ))}
         </div>
-      </section>
+      </div>
 
-      <section aria-labelledby="configuration-files-heading">
-        <h2 className="text-sm font-semibold" id="configuration-files-heading">
-          Configuration preview
-        </h2>
-        <div className="mt-3 space-y-4">
-          {report.previews.map((preview) => (
-            <article className="overflow-hidden rounded-lg border bg-card" key={preview.path}>
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
-                <div className="flex min-w-0 items-center gap-2">
-                  <FileText className="size-4 shrink-0 text-muted-foreground" />
-                  <code className="truncate text-xs text-muted-foreground">{preview.path}</code>
-                </div>
-                <span className="rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground">
-                  {preview.format}
-                </span>
+      {activeTab === "raw-config" && <RawConfigurationPreview previews={report.previews} />}
+      {activeTab === "mcp-servers" && (
+        <McpServers
+          canEditCodex={canEditCodex}
+          onUpdateEnabled={updateMcp}
+          savingId={savingId}
+          servers={mcpServers}
+        />
+      )}
+      {activeTab === "general" && (
+        <GeneralSettings
+          canEdit={canEdit}
+          config={config}
+          useGenericSettings={canEditStructured}
+          onUpdate={updateGeneral}
+          savingId={savingId}
+        />
+      )}
+      {activeTab === "features" && (
+        <FeatureSettings
+          canEdit={canEdit}
+          config={config}
+          onUpdate={updateFeature}
+          savingId={savingId}
+        />
+      )}
+      {activeTab === "plugins" && <PluginSettings config={config} />}
+      {activeTab === "projects" && <ProjectSettings config={config} />}
+      {activeTab === "environment" && <EnvironmentSettings config={config} />}
+      {activeTab === "system" && <SystemSettings config={config} />}
+      {canEdit && (
+        <p className="mt-4 text-xs text-muted-foreground">
+          Edits are revision-checked, saved atomically, and backed up alongside the config.
+          {canEditStructured &&
+            source?.format !== "JSON" &&
+            " JSONC and YAML saves normalize formatting."}
+        </p>
+      )}
+      {!canEdit && (
+        <p className="mt-4 text-xs text-muted-foreground">
+          This provider is shown in safe read-only mode while its dedicated write adapter is added.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ConfigurationTab({
+  active,
+  id,
+  label,
+  onSelect,
+}: {
+  active: boolean;
+  id: ConfigurationTabId;
+  label: string;
+  onSelect: (tab: ConfigurationTabId) => void;
+}) {
+  return (
+    <button
+      aria-controls={`${id}-panel`}
+      aria-selected={active}
+      className={`border-b-2 px-0.5 pb-3 text-sm font-medium transition-colors ${
+        active
+          ? "border-primary text-foreground"
+          : "border-transparent text-muted-foreground hover:text-foreground"
+      }`}
+      id={`${id}-tab`}
+      onClick={() => onSelect(id)}
+      role="tab"
+      type="button"
+    >
+      {label}
+    </button>
+  );
+}
+
+function RawConfigurationPreview({ previews }: { previews: ConfigurationFilePreview[] }) {
+  return (
+    <section
+      aria-labelledby="raw-config-tab"
+      className="pt-5"
+      id="raw-config-panel"
+      role="tabpanel"
+    >
+      <div className="space-y-4">
+        {previews.map((preview) => (
+          <article className="overflow-hidden rounded-lg border bg-card" key={preview.path}>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <FileText className="size-4 shrink-0 text-muted-foreground" />
+                <code className="truncate text-xs text-muted-foreground">{preview.path}</code>
               </div>
-              {preview.content !== undefined ? (
-                <pre className="max-h-[420px] overflow-auto p-4 text-xs leading-5 text-foreground">
-                  <code>{JSON.stringify(preview.content, null, 2)}</code>
-                </pre>
-              ) : (
-                <p className="p-4 text-sm text-muted-foreground">
-                  {preview.diagnostic ?? "No configuration file was found at this known location."}
-                </p>
-              )}
+              <span className="rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground">
+                {preview.format}
+              </span>
+            </div>
+            {preview.content !== undefined ? (
+              <pre className="max-h-[420px] overflow-auto p-4 text-xs leading-5 text-foreground">
+                <code>{JSON.stringify(preview.content, null, 2)}</code>
+              </pre>
+            ) : (
+              <p className="p-4 text-sm text-muted-foreground">
+                {preview.diagnostic ?? "No configuration file was found at this known location."}
+              </p>
+            )}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function McpServers({
+  canEditCodex,
+  onUpdateEnabled,
+  savingId,
+  servers,
+}: {
+  canEditCodex: boolean;
+  onUpdateEnabled: (server: McpServerSummary, enabled: boolean) => Promise<boolean>;
+  savingId?: string;
+  servers: McpServerSummary[];
+}) {
+  return (
+    <section
+      aria-labelledby="mcp-servers-tab"
+      className="pt-5"
+      id="mcp-servers-panel"
+      role="tabpanel"
+    >
+      {servers.length === 0 ? (
+        <div className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
+          No MCP servers are configured.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {servers.map((server) => (
+            <article className="rounded-lg border bg-card p-4" key={server.id}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="font-medium">{server.name}</h2>
+                  <p className="mt-1 text-xs text-muted-foreground">{server.transport}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+                      server.enabled
+                        ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                        : "bg-secondary text-secondary-foreground"
+                    }`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`size-1.5 rounded-full ${server.enabled ? "bg-emerald-500" : "bg-muted-foreground"}`}
+                    />
+                    {server.enabled ? "Enabled" : "Disabled"}
+                  </span>
+                  {(canEditCodex || server.enabledPath) && (
+                    <Switch
+                      aria-label={`${server.enabled ? "Disable" : "Enable"} ${server.name}`}
+                      checked={server.enabled}
+                      disabled={savingId !== undefined}
+                      onCheckedChange={(enabled) => void onUpdateEnabled(server, enabled)}
+                    />
+                  )}
+                </div>
+              </div>
+              <code className="mt-3 block break-all text-xs text-muted-foreground">
+                {server.endpoint}
+              </code>
             </article>
           ))}
         </div>
-      </section>
+      )}
+    </section>
+  );
+}
+
+function mcpServersFromPreviews(previews: ConfigurationFilePreview[]): McpServerSummary[] {
+  return previews.flatMap((preview) => {
+    if (!isRecord(preview.content)) {
+      return [];
+    }
+
+    return mcpServerEntries(preview.content).flatMap(({ name, path, value }) => {
+      if (!isRecord(value)) {
+        return [];
+      }
+
+      const url = firstString(value.url, value.httpUrl);
+      const commandValue = value.command;
+      const commandParts = Array.isArray(commandValue)
+        ? commandValue.filter((part): part is string => typeof part === "string")
+        : [];
+      const command = typeof commandValue === "string" ? commandValue : commandParts[0];
+      const args = Array.isArray(value.args)
+        ? value.args.filter((argument): argument is string => typeof argument === "string")
+        : commandParts.slice(1);
+      const endpoint = url ?? [command, ...args].filter(Boolean).join(" ");
+      const usesDisabledFlag = typeof value.disabled === "boolean";
+      const enabledPath =
+        typeof value.enabled === "boolean"
+          ? [...path, "enabled"]
+          : usesDisabledFlag
+            ? [...path, "disabled"]
+            : undefined;
+
+      return [
+        {
+          id: `${preview.path}:${name}`,
+          sourceId: preview.id,
+          name,
+          transport: url ? "HTTP" : "stdio",
+          endpoint: endpoint || "No endpoint or launch command configured",
+          enabled: usesDisabledFlag ? value.disabled !== true : value.enabled !== false,
+          enabledPath,
+          usesDisabledFlag,
+        },
+      ];
+    });
+  });
+}
+
+function mcpServerEntries(config: Record<string, unknown>): {
+  name: string;
+  path: string[];
+  value: unknown;
+}[] {
+  if (isRecord(config.mcp_servers)) {
+    return Object.entries(config.mcp_servers).map(([name, value]) => ({
+      name,
+      path: ["mcp_servers", name],
+      value,
+    }));
+  }
+  if (isRecord(config.mcpServers)) {
+    return Object.entries(config.mcpServers).map(([name, value]) => ({
+      name,
+      path: ["mcpServers", name],
+      value,
+    }));
+  }
+  if (Array.isArray(config.mcpServers)) {
+    return config.mcpServers.flatMap((server, index) => {
+      if (!isRecord(server)) {
+        return [];
+      }
+      const name = typeof server.name === "string" ? server.name : `Server ${index + 1}`;
+      return [{ name, path: ["mcpServers", String(index)], value: server }];
+    });
+  }
+
+  const openCodeServers = isRecord(config.mcp) ? config.mcp.servers : undefined;
+  return isRecord(openCodeServers)
+    ? Object.entries(openCodeServers).map(([name, value]) => ({
+        name,
+        path: ["mcp", "servers", name],
+        value,
+      }))
+    : [];
+}
+
+function firstString(...values: unknown[]) {
+  return values.find((value): value is string => typeof value === "string");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function configurationSourceFromPreviews(previews: ConfigurationFilePreview[]) {
+  const preview = previews.find((item) => isRecord(item.content));
+  return preview && isRecord(preview.content)
+    ? { content: preview.content, format: preview.format, id: preview.id }
+    : undefined;
+}
+
+function configurationRevision(report?: ConfigurationReport) {
+  return report?.previews.find((preview) => preview.format === "TOML")?.revision;
+}
+
+function ConfigurationPanel({
+  children,
+  tabId,
+}: {
+  children: ReactNode;
+  tabId: ConfigurationTabId;
+}) {
+  return (
+    <section
+      aria-labelledby={`${tabId}-tab`}
+      className="pt-5"
+      id={`${tabId}-panel`}
+      role="tabpanel"
+    >
+      {children}
+    </section>
+  );
+}
+
+function EmptyConfigurationState({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
+      {children}
     </div>
   );
+}
+
+function ConfigSummaryGrid({ entries }: { entries: [string, unknown][] }) {
+  return (
+    <dl className="grid overflow-hidden rounded-lg border bg-card sm:grid-cols-2">
+      {entries.map(([label, value]) => (
+        <div
+          className="border-b px-4 py-3 last:border-b-0 sm:[&:nth-last-child(2):nth-child(odd)]:border-b-0 sm:[&:nth-child(odd)]:border-r"
+          key={label}
+        >
+          <dt className="text-xs font-medium text-muted-foreground">{humanizeConfigKey(label)}</dt>
+          <dd className="mt-1 break-words text-sm font-medium">{formatConfigValue(value)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function ConfigObjectCards({ entries }: { entries: [string, unknown][] }) {
+  return (
+    <div className="space-y-4">
+      {entries.map(([section, value]) => {
+        const settings = recordEntries(value);
+
+        return (
+          <article className="overflow-hidden rounded-lg border bg-card" key={section}>
+            <h2 className="border-b px-4 py-3 text-sm font-semibold">
+              {humanizeConfigKey(section)}
+            </h2>
+            {settings.length > 0 ? (
+              <dl className="divide-y">
+                {settings.map(([label, setting]) => (
+                  <div className="flex items-center justify-between gap-4 px-4 py-3" key={label}>
+                    <dt className="text-sm text-muted-foreground">{humanizeConfigKey(label)}</dt>
+                    <dd className="max-w-[60%] break-words text-right text-sm font-medium">
+                      {formatConfigValue(setting)}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            ) : (
+              <p className="px-4 py-3 text-sm text-muted-foreground">{formatConfigValue(value)}</p>
+            )}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function GeneralSettings({
+  canEdit,
+  config,
+  onUpdate,
+  savingId,
+  useGenericSettings,
+}: {
+  canEdit: boolean;
+  config: Record<string, unknown>;
+  onUpdate: (path: string[], value: string | boolean | number) => Promise<boolean>;
+  savingId?: string;
+  useGenericSettings: boolean;
+}) {
+  const entries = useGenericSettings
+    ? editableScalarEntries(config)
+    : configEntries(config, [
+        "model",
+        "model_reasoning_effort",
+        "approval_policy",
+        "approval_mode",
+        "personality",
+        "cwd",
+      ]).flatMap(([label, value]) => (isEditableScalar(value) ? [{ path: [label], value }] : []));
+
+  return (
+    <ConfigurationPanel tabId="general">
+      {entries.length > 0 ? (
+        <dl className="grid overflow-hidden rounded-lg border bg-card sm:grid-cols-2">
+          {entries.map((entry) => (
+            <GeneralSetting
+              canEdit={canEdit && entry.path[0] !== "cwd"}
+              key={entry.path.join(".")}
+              label={entry.path}
+              onUpdate={onUpdate}
+              saving={savingId === `general:${entry.path.join(".")}`}
+              value={entry.value}
+            />
+          ))}
+        </dl>
+      ) : (
+        <EmptyConfigurationState>No general settings are configured.</EmptyConfigurationState>
+      )}
+    </ConfigurationPanel>
+  );
+}
+
+function GeneralSetting({
+  canEdit,
+  label,
+  onUpdate,
+  saving,
+  value,
+}: {
+  canEdit: boolean;
+  label: string[];
+  onUpdate: (path: string[], value: string | boolean | number) => Promise<boolean>;
+  saving: boolean;
+  value: string | boolean | number;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    if (!editing) {
+      setDraft(String(value));
+    }
+  }, [editing, value]);
+
+  const save = async () => {
+    const next = typeof value === "number" ? Number(draft) : draft;
+    if (next === value || (typeof next === "number" && Number.isNaN(next))) {
+      setEditing(false);
+      return;
+    }
+    if (await onUpdate(label, next)) {
+      setEditing(false);
+    }
+  };
+
+  const displayLabel = label.map(humanizeConfigKey).join(" · ");
+
+  return (
+    <div className="border-b px-4 py-3 last:border-b-0 sm:[&:nth-last-child(2):nth-child(odd)]:border-b-0 sm:[&:nth-child(odd)]:border-r">
+      <dt className="text-xs font-medium text-muted-foreground">{displayLabel}</dt>
+      {typeof value === "boolean" ? (
+        <dd className="mt-1 flex items-center justify-between gap-3 text-sm font-medium">
+          <span>{formatConfigValue(value)}</span>
+          {canEdit && (
+            <Switch
+              aria-label={`${value ? "Disable" : "Enable"} ${displayLabel}`}
+              checked={value}
+              disabled={saving}
+              onCheckedChange={(enabled) => void onUpdate(label, enabled)}
+            />
+          )}
+        </dd>
+      ) : editing ? (
+        <dd className="mt-2 flex items-center gap-2">
+          <input
+            aria-label={`Update ${displayLabel}`}
+            className="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-ring"
+            disabled={saving}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                void save();
+              }
+              if (event.key === "Escape") {
+                setEditing(false);
+              }
+            }}
+            value={draft}
+          />
+          <button
+            className="rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground disabled:opacity-50"
+            disabled={saving}
+            onClick={() => void save()}
+            type="button"
+          >
+            Save
+          </button>
+          <button
+            className="rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted"
+            disabled={saving}
+            onClick={() => setEditing(false)}
+            type="button"
+          >
+            Cancel
+          </button>
+        </dd>
+      ) : (
+        <dd className="mt-1 flex items-center justify-between gap-3 text-sm font-medium">
+          <span className="min-w-0 break-words">{formatConfigValue(value)}</span>
+          {canEdit && (
+            <button
+              className="shrink-0 text-xs font-medium text-primary hover:underline"
+              onClick={() => setEditing(true)}
+              type="button"
+            >
+              Edit
+            </button>
+          )}
+        </dd>
+      )}
+    </div>
+  );
+}
+
+function FeatureSettings({
+  canEdit,
+  config,
+  onUpdate,
+  savingId,
+}: {
+  canEdit: boolean;
+  config: Record<string, unknown>;
+  onUpdate: (key: string, enabled: boolean) => Promise<boolean>;
+  savingId?: string;
+}) {
+  const features = recordEntries(config.features);
+  const otherEntries = configEntries(config, ["desktop", "tui"]);
+
+  return (
+    <ConfigurationPanel tabId="features">
+      {features.length > 0 || otherEntries.length > 0 ? (
+        <div className="space-y-4">
+          {features.length > 0 && (
+            <article className="overflow-hidden rounded-lg border bg-card">
+              <h2 className="border-b px-4 py-3 text-sm font-semibold">Features</h2>
+              <dl className="divide-y">
+                {features.map(([key, setting]) => (
+                  <div className="flex items-center justify-between gap-4 px-4 py-3" key={key}>
+                    <dt className="text-sm text-muted-foreground">{humanizeConfigKey(key)}</dt>
+                    <dd className="flex shrink-0 items-center gap-3 text-sm font-medium">
+                      {typeof setting === "boolean" && canEdit ? (
+                        <>
+                          <span>{formatConfigValue(setting)}</span>
+                          <Switch
+                            aria-label={`${setting ? "Disable" : "Enable"} ${humanizeConfigKey(key)}`}
+                            checked={setting}
+                            disabled={savingId !== undefined}
+                            onCheckedChange={(enabled) => void onUpdate(key, enabled)}
+                          />
+                        </>
+                      ) : (
+                        formatConfigValue(setting)
+                      )}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </article>
+          )}
+          {otherEntries.length > 0 && <ConfigObjectCards entries={otherEntries} />}
+        </div>
+      ) : (
+        <EmptyConfigurationState>
+          No desktop, feature, or TUI settings are configured.
+        </EmptyConfigurationState>
+      )}
+    </ConfigurationPanel>
+  );
+}
+
+function PluginSettings({ config }: { config: Record<string, unknown> }) {
+  const plugins = recordEntries(config.plugins);
+  const marketplaces = recordEntries(config.marketplaces);
+
+  return (
+    <ConfigurationPanel tabId="plugins">
+      {plugins.length === 0 && marketplaces.length === 0 ? (
+        <EmptyConfigurationState>
+          No plugins or marketplaces are configured.
+        </EmptyConfigurationState>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <ConfigCollection entries={plugins} label="Plugins" />
+          <ConfigCollection entries={marketplaces} label="Marketplaces" />
+        </div>
+      )}
+    </ConfigurationPanel>
+  );
+}
+
+function ConfigCollection({ entries, label }: { entries: [string, unknown][]; label: string }) {
+  return (
+    <article className="overflow-hidden rounded-lg border bg-card">
+      <h2 className="border-b px-4 py-3 text-sm font-semibold">{label}</h2>
+      {entries.length > 0 ? (
+        <ul className="divide-y">
+          {entries.map(([name, value]) => (
+            <li className="px-4 py-3" key={name}>
+              <p className="break-all text-sm font-medium">{name}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{configurationSummary(value)}</p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="px-4 py-5 text-sm text-muted-foreground">None configured.</p>
+      )}
+    </article>
+  );
+}
+
+function ProjectSettings({ config }: { config: Record<string, unknown> }) {
+  const projects = recordEntries(config.projects);
+
+  return (
+    <ConfigurationPanel tabId="projects">
+      {projects.length === 0 ? (
+        <EmptyConfigurationState>
+          No project-specific overrides are configured.
+        </EmptyConfigurationState>
+      ) : (
+        <div className="grid gap-3 lg:grid-cols-2">
+          {projects.map(([path, value]) => (
+            <article className="rounded-lg border bg-card p-4" key={path}>
+              <code className="block truncate text-xs text-muted-foreground" title={path}>
+                {path}
+              </code>
+              <dl className="mt-3 space-y-2 text-sm">
+                {projectSummary(value).map(([label, setting]) => (
+                  <div className="flex items-center justify-between gap-3" key={label}>
+                    <dt className="text-muted-foreground">{humanizeConfigKey(label)}</dt>
+                    <dd className="text-right font-medium">{formatConfigValue(setting)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </article>
+          ))}
+        </div>
+      )}
+    </ConfigurationPanel>
+  );
+}
+
+function EnvironmentSettings({ config }: { config: Record<string, unknown> }) {
+  const policy = isRecord(config.shell_environment_policy)
+    ? config.shell_environment_policy
+    : undefined;
+  const entries = policy
+    ? Object.entries(policy).map(
+        ([key, value]) => [key, collectionSummary(value)] as [string, unknown],
+      )
+    : [];
+
+  return (
+    <ConfigurationPanel tabId="environment">
+      {entries.length > 0 ? (
+        <>
+          <ConfigSummaryGrid entries={entries} />
+          <p className="mt-3 text-xs text-muted-foreground">
+            Environment values stay hidden; this view shows policy and rule counts only.
+          </p>
+        </>
+      ) : (
+        <EmptyConfigurationState>
+          No shell environment policy is configured.
+        </EmptyConfigurationState>
+      )}
+    </ConfigurationPanel>
+  );
+}
+
+function SystemSettings({ config }: { config: Record<string, unknown> }) {
+  const entries = configEntries(config, ["notice"]);
+
+  return (
+    <ConfigurationPanel tabId="system">
+      {entries.length > 0 ? (
+        <ConfigObjectCards entries={entries} />
+      ) : (
+        <EmptyConfigurationState>
+          No notices or migration settings are configured.
+        </EmptyConfigurationState>
+      )}
+    </ConfigurationPanel>
+  );
+}
+
+function configEntries(config: Record<string, unknown>, keys: string[]) {
+  return keys.filter((key) => key in config).map((key) => [key, config[key]] as [string, unknown]);
+}
+
+function isEditableScalar(value: unknown): value is string | boolean | number {
+  return typeof value === "string" || typeof value === "boolean" || typeof value === "number";
+}
+
+function editableScalarEntries(config: Record<string, unknown>) {
+  const excludedSections = new Set([
+    "mcp",
+    "mcp_servers",
+    "mcpServers",
+    "features",
+    "env",
+    "environment",
+  ]);
+  const entries: { path: string[]; value: string | boolean | number }[] = [];
+  const visit = (value: unknown, path: string[]) => {
+    const key = path[path.length - 1]?.toLowerCase() ?? "";
+    if (
+      ["secret", "token", "password", "api_key", "apikey", "credential"].some((term) =>
+        key.includes(term),
+      )
+    ) {
+      return;
+    }
+    if (isEditableScalar(value)) {
+      entries.push({ path, value });
+      return;
+    }
+    if (!isRecord(value) || path.length >= 2) {
+      return;
+    }
+    Object.entries(value).forEach(([childKey, childValue]) =>
+      visit(childValue, [...path, childKey]),
+    );
+  };
+
+  Object.entries(config).forEach(([key, value]) => {
+    if (!excludedSections.has(key)) {
+      visit(value, [key]);
+    }
+  });
+  return entries;
+}
+
+function recordEntries(value: unknown): [string, unknown][] {
+  return isRecord(value) ? Object.entries(value) : [];
+}
+
+function projectSummary(value: unknown): [string, unknown][] {
+  if (!isRecord(value)) {
+    return [["configuration", configurationSummary(value)]];
+  }
+
+  const summary = configEntries(value, ["trust_level", "default_permissions", "approval_policy"]);
+  return summary.length > 0 ? summary : [["configuration", configurationSummary(value)]];
+}
+
+function collectionSummary(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `${value.length} ${value.length === 1 ? "entry" : "entries"}`;
+  }
+  if (isRecord(value)) {
+    return `${Object.keys(value).length} ${Object.keys(value).length === 1 ? "setting" : "settings"}`;
+  }
+  return formatConfigValue(value);
+}
+
+function configurationSummary(value: unknown): string {
+  if (isRecord(value) || Array.isArray(value)) {
+    return collectionSummary(value);
+  }
+  return formatConfigValue(value);
+}
+
+function formatConfigValue(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "boolean") {
+    return value ? "Enabled" : "Disabled";
+  }
+  if (value === null || value === undefined) {
+    return "Not set";
+  }
+  if (isRecord(value) || Array.isArray(value)) {
+    return collectionSummary(value);
+  }
+  return String(value);
+}
+
+function humanizeConfigKey(key: string): string {
+  return key.replace(/_/g, " ").replace(/\b\w/g, (character: string) => character.toUpperCase());
 }
 
 function ConfigurationSkeleton() {
@@ -1153,7 +2156,6 @@ function configurationTarget(
 ): ConfigurationTarget {
   const familyPresentation = getFamilyPresentation(family.id, family.name);
   const runtimePresentation = getRuntimePresentation(family.id, runtime.id, runtime.name);
-  const surfaceNames = runtime.surfaces.map((surface) => surface.name).join(", ");
 
   return {
     id: `${family.id}:${runtime.id}`,
@@ -1161,9 +2163,6 @@ function configurationTarget(
     runtimeId: runtime.id,
     familyName: familyPresentation.label,
     name: runtimePresentation.label,
-    description: surfaceNames
-      ? `${runtime.message} Shared across: ${surfaceNames}.`
-      : runtime.message,
     status: runtime.status,
   };
 }

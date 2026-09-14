@@ -7,15 +7,18 @@
 use notify::{Config as WatchConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
-    collections::HashSet,
+    collections::{hash_map::DefaultHasher, HashSet},
     env,
     ffi::OsString,
     fs,
+    hash::{Hash, Hasher},
+    io::Write,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, State};
+use toml_edit::{value, DocumentMut};
 
 const CODEX_ID: &str = "codex-cli";
 
@@ -130,9 +133,11 @@ struct ConfigurationReport {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConfigurationFilePreview {
+    id: String,
     path: String,
     format: String,
     exists: bool,
+    revision: Option<String>,
     content: Option<serde_json::Value>,
     diagnostic: Option<String>,
 }
@@ -245,6 +250,159 @@ fn inspect_configuration(
         surfaces: runtime.surfaces,
         previews,
     })
+}
+
+/// Writes a whitelisted Codex general setting after checking the file revision
+/// observed by the UI. The caller can never select an arbitrary path or key.
+#[tauri::command]
+fn update_codex_general_setting(
+    key: String,
+    setting_value: String,
+    expected_revision: String,
+) -> Result<ConfigurationReport, String> {
+    update_codex_document(&expected_revision, |document, _| {
+        set_codex_general_setting(document, &key, &setting_value)
+    })?;
+
+    inspect_configuration("codex".into(), "codex-local".into())
+}
+
+/// Updates an existing Codex feature flag. Feature keys must already exist as
+/// booleans, which prevents this command from introducing arbitrary TOML.
+#[tauri::command]
+fn update_codex_feature(
+    key: String,
+    enabled: bool,
+    expected_revision: String,
+) -> Result<ConfigurationReport, String> {
+    update_codex_document(&expected_revision, |document, config| {
+        set_codex_feature(document, config, &key, enabled)
+    })?;
+
+    inspect_configuration("codex".into(), "codex-local".into())
+}
+
+/// Changes only the explicit enabled state of an existing Codex MCP server.
+#[tauri::command]
+fn update_codex_mcp_enabled(
+    server: String,
+    enabled: bool,
+    expected_revision: String,
+) -> Result<ConfigurationReport, String> {
+    update_codex_document(&expected_revision, |document, config| {
+        set_codex_mcp_enabled(document, config, &server, enabled)
+    })?;
+
+    inspect_configuration("codex".into(), "codex-local".into())
+}
+
+/// Updates an existing scalar in a discovered JSON, JSONC, or YAML configuration
+/// source. This is the shared write path used by providers whose settings are
+/// structurally compatible with the generic editor.
+#[tauri::command]
+fn update_configuration_value(
+    family_id: String,
+    runtime_id: String,
+    store_id: String,
+    path: Vec<String>,
+    setting_value: serde_json::Value,
+    expected_revision: String,
+) -> Result<ConfigurationReport, String> {
+    let store = configuration_store_for(&family_id, &runtime_id, &store_id)?;
+    if !matches!(store.format.as_str(), "JSON" | "JSONC" | "YAML" | "YML") {
+        return Err(format!(
+            "{} uses a dedicated configuration writer",
+            store.format
+        ));
+    }
+    if path.is_empty() {
+        return Err("A configuration path is required.".into());
+    }
+    if path.iter().any(|segment| is_sensitive_key(segment)) {
+        return Err("Sensitive settings cannot be changed through Omni Harness.".into());
+    }
+
+    update_structured_configuration(&store, &path, setting_value, &expected_revision)?;
+    inspect_configuration(family_id, runtime_id)
+}
+
+fn configuration_store_for(
+    family_id: &str,
+    runtime_id: &str,
+    store_id: &str,
+) -> Result<ConfigurationStore, String> {
+    let scan = scan_harnesses();
+    let family = scan
+        .families
+        .into_iter()
+        .find(|family| family.id == family_id)
+        .ok_or_else(|| format!("Unsupported harness family: {family_id}"))?;
+    let runtime = family
+        .runtimes
+        .into_iter()
+        .find(|runtime| runtime.id == runtime_id)
+        .ok_or_else(|| format!("Unsupported runtime for {}: {runtime_id}", family.name))?;
+    runtime
+        .config_stores
+        .into_iter()
+        .find(|store| store.id == store_id)
+        .ok_or_else(|| "Unsupported configuration source.".into())
+}
+
+fn set_codex_general_setting(
+    document: &mut DocumentMut,
+    key: &str,
+    setting_value: &str,
+) -> Result<(), String> {
+    if !matches!(
+        key,
+        "model" | "model_reasoning_effort" | "approval_policy" | "approval_mode" | "personality"
+    ) {
+        return Err(format!("Unsupported Codex setting: {key}"));
+    }
+
+    document[key] = value(setting_value);
+    Ok(())
+}
+
+fn set_codex_feature(
+    document: &mut DocumentMut,
+    config: &toml::Value,
+    key: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let is_feature_flag = config
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .and_then(|features| features.get(key))
+        .and_then(toml::Value::as_bool)
+        .is_some();
+    if !is_feature_flag {
+        return Err(format!("Unknown Codex feature flag: {key}"));
+    }
+
+    document["features"][key] = value(enabled);
+    Ok(())
+}
+
+fn set_codex_mcp_enabled(
+    document: &mut DocumentMut,
+    config: &toml::Value,
+    server: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let exists = config
+        .get("mcp_servers")
+        .and_then(toml::Value::as_table)
+        .and_then(|servers| servers.get(server))
+        .and_then(toml::Value::as_table)
+        .is_some();
+    if !exists {
+        return Err(format!("Unknown Codex MCP server: {server}"));
+    }
+
+    document["mcp_servers"][server]["enabled"] = value(enabled);
+    Ok(())
 }
 
 /// Starts a non-recursive watch on a known config file. No arbitrary user path
@@ -520,13 +678,22 @@ fn scan_claude_family() -> HarnessFamilySummary {
 fn scan_cursor_family() -> HarnessFamilySummary {
     let stores = home_dir()
         .map(|home| {
-            vec![configuration_store(
-                "cursor-cli",
-                "Cursor Agent CLI configuration",
-                "JSON",
-                home.join(".cursor/cli-config.json"),
-                &["CLI"],
-            )]
+            vec![
+                configuration_store(
+                    "cursor-cli",
+                    "Cursor Agent CLI configuration",
+                    "JSON",
+                    home.join(".cursor/cli-config.json"),
+                    &["CLI"],
+                ),
+                configuration_store(
+                    "cursor-mcp",
+                    "Cursor global MCP configuration",
+                    "JSON",
+                    home.join(".cursor/mcp.json"),
+                    &["CLI", "Desktop"],
+                ),
+            ]
         })
         .unwrap_or_default();
     let surfaces = vec![
@@ -902,7 +1069,7 @@ fn catalog_entries() -> Vec<CatalogEntry> {
             executables: &["cline"],
             applications: &[],
             extensions: &["saoudrizwan.claude-dev", "saoudrizwan.cline", "cline.cline"],
-            home_configs: &[],
+            home_configs: &[(".cline/mcp.json", "JSON")],
         },
         CatalogEntry {
             id: "warp",
@@ -1379,11 +1546,195 @@ fn redact_toml(value: &toml::Value, key: Option<&str>) -> serde_json::Value {
     }
 }
 
+fn update_codex_document<F>(expected_revision: &str, mutate: F) -> Result<(), String>
+where
+    F: FnOnce(&mut DocumentMut, &toml::Value) -> Result<(), String>,
+{
+    let path = codex_config_path();
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let revision = configuration_revision(&content);
+    if revision != expected_revision {
+        return Err("The configuration changed on disk. Reload it before saving again.".into());
+    }
+
+    let config = content
+        .parse::<toml::Value>()
+        .map_err(|error| format!("Could not parse Codex configuration: {error}"))?;
+    let mut document = content
+        .parse::<DocumentMut>()
+        .map_err(|error| format!("Could not preserve Codex configuration formatting: {error}"))?;
+
+    mutate(&mut document, &config)?;
+
+    let next_content = document.to_string();
+    next_content
+        .parse::<toml::Value>()
+        .map_err(|error| format!("The updated Codex configuration is invalid: {error}"))?;
+    write_configuration_atomically(&path, &next_content)
+}
+
+fn write_configuration_atomically(path: &Path, content: &str) -> Result<(), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Could not determine filename for {}", path.display()))?;
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "Could not determine parent directory for {}",
+            path.display()
+        )
+    })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temporary_path = parent.join(format!(".{file_name}.omniharness-{nonce}.tmp"));
+    let backup_path = parent.join(format!("{file_name}.omniharness.bak"));
+
+    let mut temporary = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary_path)
+        .map_err(|error| format!("Could not prepare configuration update: {error}"))?;
+    if let Err(error) = temporary
+        .write_all(content.as_bytes())
+        .and_then(|_| temporary.sync_all())
+    {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(format!("Could not write configuration update: {error}"));
+    }
+    fs::set_permissions(&temporary_path, metadata.permissions())
+        .map_err(|error| format!("Could not preserve configuration permissions: {error}"))?;
+    fs::copy(path, &backup_path)
+        .map_err(|error| format!("Could not create configuration backup: {error}"))?;
+    fs::rename(&temporary_path, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary_path);
+        format!("Could not replace configuration atomically: {error}")
+    })
+}
+
+fn configuration_revision(content: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn update_structured_configuration(
+    store: &ConfigurationStore,
+    path: &[String],
+    setting_value: serde_json::Value,
+    expected_revision: &str,
+) -> Result<(), String> {
+    let content = fs::read_to_string(&store.path)
+        .map_err(|error| format!("Could not read {}: {error}", store.path))?;
+    if configuration_revision(&content) != expected_revision {
+        return Err("The configuration changed on disk. Reload it before saving again.".into());
+    }
+
+    let mut config = parse_structured_configuration(&store.format, &content)?;
+    set_existing_json_value(&mut config, path, setting_value)?;
+    let next_content = serialize_structured_configuration(&store.format, &config)?;
+    write_configuration_atomically(Path::new(&store.path), &next_content)
+}
+
+fn parse_structured_configuration(
+    format: &str,
+    content: &str,
+) -> Result<serde_json::Value, String> {
+    match format {
+        "JSON" => {
+            serde_json::from_str(content).map_err(|error| format!("Could not parse JSON: {error}"))
+        }
+        "JSONC" => {
+            json5::from_str(content).map_err(|error| format!("Could not parse JSONC: {error}"))
+        }
+        "YAML" | "YML" => {
+            let value = serde_yaml::from_str::<serde_yaml::Value>(content)
+                .map_err(|error| format!("Could not parse YAML: {error}"))?;
+            serde_json::to_value(value)
+                .map_err(|error| format!("Could not normalize YAML: {error}"))
+        }
+        _ => Err(format!(
+            "Unsupported structured configuration format: {format}"
+        )),
+    }
+}
+
+fn serialize_structured_configuration(
+    format: &str,
+    value: &serde_json::Value,
+) -> Result<String, String> {
+    match format {
+        "JSON" | "JSONC" => serde_json::to_string_pretty(value)
+            .map(|content| format!("{content}\n"))
+            .map_err(|error| format!("Could not serialize JSON configuration: {error}")),
+        "YAML" | "YML" => serde_yaml::to_string(value)
+            .map_err(|error| format!("Could not serialize YAML configuration: {error}")),
+        _ => Err(format!(
+            "Unsupported structured configuration format: {format}"
+        )),
+    }
+}
+
+fn set_existing_json_value(
+    current: &mut serde_json::Value,
+    path: &[String],
+    next: serde_json::Value,
+) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("A configuration path is required.".into());
+    }
+    if path.len() == 1 {
+        let object = current
+            .as_object_mut()
+            .ok_or_else(|| "The configuration root is not an object.".to_string())?;
+        let existing = object
+            .get(&path[0])
+            .ok_or_else(|| "This setting is not present in the configuration.".to_string())?;
+        if !matching_scalar_types(existing, &next) {
+            return Err("The updated value has an incompatible type.".into());
+        }
+        object.insert(path[0].clone(), next);
+        return Ok(());
+    }
+
+    let segment = &path[0];
+    match current {
+        serde_json::Value::Object(object) => {
+            let child = object
+                .get_mut(segment)
+                .ok_or_else(|| "This setting is not present in the configuration.".to_string())?;
+            set_existing_json_value(child, &path[1..], next)
+        }
+        serde_json::Value::Array(values) => {
+            let index = segment.parse::<usize>().map_err(|_| {
+                "The configuration path contains an invalid list index.".to_string()
+            })?;
+            let child = values
+                .get_mut(index)
+                .ok_or_else(|| "This setting is not present in the configuration.".to_string())?;
+            set_existing_json_value(child, &path[1..], next)
+        }
+        _ => Err("The configuration path cannot be updated.".into()),
+    }
+}
+
+fn matching_scalar_types(current: &serde_json::Value, next: &serde_json::Value) -> bool {
+    (current.is_string() && next.is_string())
+        || (current.is_boolean() && next.is_boolean())
+        || (current.is_number() && next.is_number())
+}
+
 fn configuration_file_preview(store: &ConfigurationStore) -> ConfigurationFilePreview {
     let mut preview = ConfigurationFilePreview {
+        id: store.id.clone(),
         path: store.path.clone(),
         format: store.format.clone(),
         exists: store.exists,
+        revision: None,
         content: None,
         diagnostic: None,
     };
@@ -1400,6 +1751,7 @@ fn configuration_file_preview(store: &ConfigurationStore) -> ConfigurationFilePr
             return preview;
         }
     };
+    preview.revision = Some(configuration_revision(&content));
 
     match store.format.as_str() {
         "TOML" => match content.parse::<toml::Value>() {
@@ -1409,6 +1761,19 @@ fn configuration_file_preview(store: &ConfigurationStore) -> ConfigurationFilePr
         "JSON" => match serde_json::from_str::<serde_json::Value>(&content) {
             Ok(value) => preview.content = Some(redact_json(&value, None)),
             Err(error) => preview.diagnostic = Some(format!("Could not parse JSON: {error}")),
+        },
+        "JSONC" => match json5::from_str::<serde_json::Value>(&content) {
+            Ok(value) => preview.content = Some(redact_json(&value, None)),
+            Err(error) => preview.diagnostic = Some(format!("Could not parse JSONC: {error}")),
+        },
+        "YAML" | "YML" => match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+            Ok(value) => match serde_json::to_value(value) {
+                Ok(value) => preview.content = Some(redact_json(&value, None)),
+                Err(error) => {
+                    preview.diagnostic = Some(format!("Could not normalize YAML: {error}"));
+                }
+            },
+            Err(error) => preview.diagnostic = Some(format!("Could not parse YAML: {error}")),
         },
         format => {
             preview.diagnostic = Some(format!(
@@ -1572,6 +1937,10 @@ pub fn run() {
             scan_harnesses,
             inspect_harness,
             inspect_configuration,
+            update_codex_general_setting,
+            update_codex_feature,
+            update_codex_mcp_enabled,
+            update_configuration_value,
             watch_harness
         ])
         .run(tauri::generate_context!())
@@ -1669,5 +2038,162 @@ LINEAR_API_KEY = "super-secret"
             .shared_by
             .iter()
             .any(|surface| surface == "Desktop"));
+    }
+
+    #[test]
+    fn codex_mutations_preserve_comments_and_validate_known_paths() {
+        let source = r#"# Keep this comment
+model = "old-model"
+
+[features]
+fast_mode = false
+
+[mcp_servers.example]
+command = "example-mcp"
+"#;
+        let config: toml::Value = source.parse().expect("fixture is valid TOML");
+        let mut document = source
+            .parse::<DocumentMut>()
+            .expect("fixture preserves formatting");
+
+        set_codex_general_setting(&mut document, "model", "new-model").expect("known setting");
+        set_codex_feature(&mut document, &config, "fast_mode", true).expect("known feature");
+        set_codex_mcp_enabled(&mut document, &config, "example", false).expect("known server");
+
+        let output = document.to_string();
+        assert!(output.contains("# Keep this comment"));
+        let parsed: toml::Value = output.parse().expect("updated TOML is valid");
+        assert_eq!(parsed["model"].as_str(), Some("new-model"));
+        assert_eq!(parsed["features"]["fast_mode"].as_bool(), Some(true));
+        assert_eq!(
+            parsed["mcp_servers"]["example"]["enabled"].as_bool(),
+            Some(false)
+        );
+
+        assert!(set_codex_general_setting(&mut document, "unknown", "value").is_err());
+        assert!(set_codex_feature(&mut document, &config, "unknown", true).is_err());
+        assert!(set_codex_mcp_enabled(&mut document, &config, "unknown", true).is_err());
+    }
+
+    #[test]
+    fn configuration_revision_detects_content_changes() {
+        assert_eq!(
+            configuration_revision("model = \"a\""),
+            configuration_revision("model = \"a\"")
+        );
+        assert_ne!(
+            configuration_revision("model = \"a\""),
+            configuration_revision("model = \"b\"")
+        );
+    }
+
+    #[test]
+    fn structured_updates_only_replace_existing_matching_scalars() {
+        let mut config = serde_json::json!({
+            "permissions": { "defaultMode": "ask" },
+            "mcpServers": [{ "name": "docs", "disabled": false }]
+        });
+
+        set_existing_json_value(
+            &mut config,
+            &["permissions".into(), "defaultMode".into()],
+            serde_json::json!("allow"),
+        )
+        .expect("existing nested string is writable");
+        set_existing_json_value(
+            &mut config,
+            &["mcpServers".into(), "0".into(), "disabled".into()],
+            serde_json::json!(true),
+        )
+        .expect("existing list boolean is writable");
+
+        assert_eq!(config["permissions"]["defaultMode"], "allow");
+        assert_eq!(config["mcpServers"][0]["disabled"], true);
+        assert!(set_existing_json_value(
+            &mut config,
+            &["permissions".into(), "missing".into()],
+            serde_json::json!("value"),
+        )
+        .is_err());
+        assert!(set_existing_json_value(
+            &mut config,
+            &["permissions".into(), "defaultMode".into()],
+            serde_json::json!(true),
+        )
+        .is_err());
+        assert!(is_sensitive_key("api_key"));
+        assert!(is_sensitive_key("accessToken"));
+        assert!(!is_sensitive_key("defaultMode"));
+    }
+
+    #[test]
+    fn atomic_write_keeps_a_recoverable_backup() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is available")
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("omni-harness-test-{nonce}"));
+        fs::create_dir(&directory).expect("temporary directory is created");
+        let path = directory.join("config.toml");
+        fs::write(&path, "model = \"before\"\n").expect("fixture is written");
+
+        write_configuration_atomically(&path, "model = \"after\"\n")
+            .expect("atomic write succeeds");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("updated file"),
+            "model = \"after\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.join("config.toml.omniharness.bak")).expect("backup file"),
+            "model = \"before\"\n"
+        );
+
+        fs::remove_dir_all(directory).expect("temporary directory is removed");
+    }
+
+    #[test]
+    fn previews_jsonc_and_yaml_configurations_without_exposing_secrets() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is available")
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("omni-harness-preview-test-{nonce}"));
+        fs::create_dir(&directory).expect("temporary directory is created");
+
+        let jsonc_path = directory.join("opencode.jsonc");
+        fs::write(
+            &jsonc_path,
+            "// comment\n{ mcp: { servers: { docs: { disabled: true } } } }",
+        )
+        .expect("JSONC fixture is written");
+        let jsonc_preview = configuration_file_preview(&configuration_store(
+            "jsonc",
+            "JSONC fixture",
+            "JSONC",
+            jsonc_path,
+            &[],
+        ));
+        assert_eq!(
+            jsonc_preview.content.expect("JSONC content")["mcp"]["servers"]["docs"]["disabled"],
+            true
+        );
+
+        let yaml_path = directory.join("config.yaml");
+        fs::write(&yaml_path, "api_key: hidden\nmcpServers:\n  - name: docs\n")
+            .expect("YAML fixture is written");
+        let yaml_preview = configuration_file_preview(&configuration_store(
+            "yaml",
+            "YAML fixture",
+            "YAML",
+            yaml_path,
+            &[],
+        ));
+        assert_eq!(
+            yaml_preview.content.expect("YAML content")["api_key"],
+            "[redacted]"
+        );
+
+        fs::remove_dir_all(directory).expect("temporary directory is removed");
     }
 }
